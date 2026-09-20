@@ -38,11 +38,23 @@
             *print-readably* true *print-dup* false]
     (pr-str x)))
 
+(defn- hex-bytes [^bytes bs]
+  (apply str (map #(format "%02x" (bit-and 0xff %)) bs)))
+
 (defn digest [x]
   (str "sha256:"
-       (apply str (map #(format "%02x" (bit-and 0xff %))
-                       (.digest (MessageDigest/getInstance "SHA-256")
-                                (.getBytes (canonical x) StandardCharsets/UTF_8))))))
+       (hex-bytes (.digest (MessageDigest/getInstance "SHA-256")
+                           (.getBytes (canonical x) StandardCharsets/UTF_8)))))
+
+(defn sha256-bytes
+  "SHA-256 over exact raw bytes, returning \"sha256:<64hex>\". Artifact
+   content identity: the bytes are hashed raw, NOT through the 0001
+   canonical EDN encoding (that is what `digest` is for). Pure; the caller
+   supplies the bytes — no I/O happens here."
+  [bs]
+  (when-not (bytes? bs)
+    (invalid! "sha256-bytes requires a byte array" {:value-type (str (type bs))}))
+  (str "sha256:" (hex-bytes (.digest (MessageDigest/getInstance "SHA-256") bs))))
 
 (defn candidate-id [candidate]
   (digest candidate))

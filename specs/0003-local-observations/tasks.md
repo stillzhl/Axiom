@@ -14,12 +14,18 @@
   and submodules as typed entries without following or recursing.
   (Landed 2026-09-20, slice 1; `axiom.cli`'s `git-commit` helper moved
   here as `current-commit-sha`, behavior unchanged.)
-- [ ] T3: Implement artifact digesting and the `artifacts` table:
+- [x] T3: Implement artifact digesting and the `artifacts` table:
   SHA-256 over exact bytes, media type/size/location records, retention
   statuses (`retained`/`expired`/`superseded`), declared retention
   bounds, schema-v3 forward-only transactional migration owned by
   `axiom.store`. Rows are marked, never deleted; exceeding a bound is an
-  operational failure with the reason named.
+  operational failure with the reason named. (Landed 2026-09-20, slice
+  2: PR "feat: implement 0003 artifact digesting and retention (schema
+  v3)". `axiom.model/sha256-bytes` hashes raw bytes, distinct from the
+  0001 canonical-EDN `digest`; `axiom.store` gains `record-artifact!`,
+  `mark-artifact!`, `read-artifact`, `list-artifacts` with read-back
+  validation; `recorded_seq` -1 sentinel reads back as nil; optional
+  `:artifact/bytes` cross-check at record time.)
 - [ ] T4: Implement `axiom.runner` (pure port) and
   `axiom.adapters.runner`: command registry schema with approved command
   IDs and structured argument slots, no shell interpolation (explicit

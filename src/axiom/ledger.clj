@@ -14,8 +14,9 @@
 (def reducer-version "ledger-reducer-v1")
 (def bundle-version 1)
 ;; Highest ledger schema version this code understands. v1 is the base
-;; schema; v2 adds a covering index (see axiom.store migrations).
-(def supported-schema-version 2)
+;; schema; v2 adds a covering index; v3 adds the artifacts table (spec 0003)
+;; — see axiom.store migrations.
+(def supported-schema-version 3)
 
 (def report-limitations
   [:unauthenticated-inputs :test-evidence-is-not-proof :no-execution-authorization

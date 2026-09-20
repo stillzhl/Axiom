@@ -1,12 +1,13 @@
 (ns axiom.store
-  "SQLite adapter for the durable ledger (spec 0002). This is the only
+  "SQLite adapter for the durable ledger (specs 0002, 0003). This is the only
    namespace that touches the database file. All chain logic, validation
    and reduction live in the pure axiom.ledger port; this namespace only
-   maps envelopes and snapshots to rows, runs transactions and applies
-   numbered forward-only migrations."
+   maps envelopes, snapshots and artifact rows to tables, runs
+   transactions and applies numbered forward-only migrations."
   (:require [axiom.contract :as contract]
             [axiom.ledger :as ledger]
-            [axiom.model :as model])
+            [axiom.model :as model]
+            [clojure.string :as str])
   (:import (java.io File)
            (java.sql Connection DriverManager PreparedStatement ResultSet SQLException)))
 
@@ -37,7 +38,16 @@
 ;; Numbered, forward-only, transactional migrations. A migration may add
 ;; tables, columns or indexes; it must never rewrite stored event payloads.
 (def ^:private migrations
-  {2 ["CREATE INDEX IF NOT EXISTS idx_events_stream_seq ON events(stream_id, seq)"]})
+  {2 ["CREATE INDEX IF NOT EXISTS idx_events_stream_seq ON events(stream_id, seq)"]
+   ;; Spec 0003 R3: artifact digest metadata. Rows are marked, never
+   ;; deleted; the digest is the row identity (content identity, not trust).
+   3 ["CREATE TABLE artifacts (
+        digest TEXT PRIMARY KEY,
+        media_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        retention TEXT NOT NULL,
+        location TEXT NOT NULL,
+        recorded_seq INTEGER NOT NULL)"]})
 
 (defn- operational! [message data]
   (ledger/operational! message data))
@@ -321,3 +331,296 @@
             snapshot (ledger/build-snapshot envelopes)]
         (store-snapshot! handle snapshot)
         snapshot))))
+
+(defn- query-all [^Connection conn ^String sql params]
+  (with-open [stmt (.prepareStatement conn sql)]
+    (doseq [[i p] (map-indexed vector params)] (.setObject ^PreparedStatement stmt (inc i) p))
+    (with-open [^ResultSet rs (.executeQuery ^PreparedStatement stmt)]
+      (loop [acc []]
+        (if (.next rs)
+          (let [meta (.getMetaData rs)]
+            (recur (conj acc (into {} (for [i (range 1 (inc (.getColumnCount meta)))]
+                                       [(keyword (.getColumnLabel meta i)) (.getObject rs i)])))))
+          acc)))))
+
+;; ---------------------------------------------------------------------------
+;; Artifacts (spec 0003 R3)
+;;
+;; The artifacts table records content digests, media types, sizes,
+;; retention statuses and location references for files digested with
+;; axiom.model/sha256-bytes (SHA-256 over exact raw bytes). The digest is
+;; content identity only — it does not establish that a trustworthy
+;; producer created the bytes. The ledger stores digests, never binary
+;; payloads. Rows are marked (retained/expired/superseded), never deleted,
+;; so past decisions stay reproducible from bundles.
+
+(def default-media-type
+  "Media type recorded when the caller supplies none. A content label,
+   never a trust statement."
+  "application/octet-stream")
+
+(def ^:private retention-statuses #{:retained :expired :superseded})
+
+;; recorded_seq sentinel for artifacts recorded without a ledger event.
+;; The column is NOT NULL per the design DDL; nil reads back as nil.
+(def ^:private unrecorded-seq -1)
+
+(defn- artifact-digest? [value]
+  (and (string? value) (boolean (re-matches #"sha256:[0-9a-f]{64}" value))))
+
+(defn- media-type? [value]
+  ;; Non-blank validated label with a restricted character set, in the
+  ;; shape of the existing id? predicate (plus '+' for suffixes such as
+  ;; application/atom+xml). Content label, never a trust statement.
+  (and (string? value)
+       (boolean (re-matches #"[A-Za-z0-9][A-Za-z0-9._/+.-]{0,127}" value))))
+
+(defn- non-negative-long? [value]
+  (and (integer? value) (<= 0 value Long/MAX_VALUE)))
+
+(defn- retention-status
+  "Normalizes a keyword or string retention value to a keyword, or nil."
+  [value]
+  (cond (keyword? value) (when (contains? retention-statuses value) value)
+        (string? value) (let [k (keyword value)]
+                          (when (contains? retention-statuses k) k))))
+
+(def ^:private artifact-fields
+  #{:artifact/digest :artifact/media-type :artifact/size-bytes :artifact/retention
+    :artifact/location :artifact/recorded-seq :artifact/bytes})
+
+(defn- validate-artifact-input! [artifact]
+  (when-not (map? artifact)
+    (model/invalid! "Artifact must be a map" {}))
+  (when-let [unknown (seq (remove artifact-fields (keys artifact)))]
+    (model/invalid! "Unknown artifact fields" {:unknown (vec unknown)}))
+  (let [digest (:artifact/digest artifact)]
+    (when-not (artifact-digest? digest)
+      (model/invalid! "Invalid artifact digest" {:digest digest})))
+  (let [media-type (get artifact :artifact/media-type default-media-type)]
+    (when-not (media-type? media-type)
+      (model/invalid! "Invalid artifact media type" {:media-type media-type})))
+  (let [size (:artifact/size-bytes artifact)]
+    (when-not (non-negative-long? size)
+      (model/invalid! "Invalid artifact size" {:size-bytes size})))
+  (when-not (retention-status (get artifact :artifact/retention :retained))
+    (model/invalid! "Invalid artifact retention status"
+                    {:retention (:artifact/retention artifact)}))
+  (let [location (:artifact/location artifact)]
+    (when-not (and (string? location) (not (str/blank? location)))
+      (model/invalid! "Invalid artifact location" {:location location})))
+  (let [recorded-seq (get artifact :artifact/recorded-seq nil)]
+    (when-not (or (nil? recorded-seq) (non-negative-long? recorded-seq))
+      (model/invalid! "Invalid artifact recorded-seq" {:recorded-seq recorded-seq})))
+  ;; Optional boundary cross-check: when the caller supplies the exact
+  ;; bytes, the digest and size are verified against them here. A mismatch
+  ;; is an input problem, not an operational failure.
+  (let [bs (:artifact/bytes artifact)]
+    (when (some? bs)
+      (when-not (bytes? bs)
+        (model/invalid! "Artifact bytes must be a byte array"
+                        {:value-type (str (type bs))}))
+      (when-not (= (:artifact/digest artifact) (model/sha256-bytes ^bytes bs))
+        (model/invalid! "Artifact digest does not match supplied bytes"
+                        {:reason :digest-mismatch :digest (:artifact/digest artifact)}))
+      (when-not (= (long (:artifact/size-bytes artifact)) (alength ^bytes bs))
+        (model/invalid! "Artifact size does not match supplied bytes"
+                        {:reason :size-mismatch
+                         :size-bytes (:artifact/size-bytes artifact)
+                         :byte-count (alength ^bytes bs)}))))
+  artifact)
+
+(def ^:private bound-keys #{:max/artifact-bytes :max/retained-artifacts})
+
+(defn- validate-bounds! [bounds]
+  (when-not (map? bounds)
+    (model/invalid! "Retention bounds must be a map" {}))
+  (doseq [k bound-keys]
+    (let [v (get bounds k ::missing)]
+      (when-not (non-negative-long? v)
+        (model/invalid! "Retention bound must be a non-negative integer"
+                        {:bound k :value (when-not (= ::missing v) v)}))))
+  bounds)
+
+(defn- normalize-artifact-row! [artifact]
+  (validate-artifact-input! artifact)
+  {:digest (:artifact/digest artifact)
+   :media-type (get artifact :artifact/media-type default-media-type)
+   :size-bytes (long (:artifact/size-bytes artifact))
+   :retention (name (retention-status (get artifact :artifact/retention :retained)))
+   :location (:artifact/location artifact)
+   :recorded-seq (if-some [s (:artifact/recorded-seq artifact)] (long s) unrecorded-seq)})
+
+(defn- row->artifact
+  "Read-back validation of a stored artifact row. Stored corruption is an
+   operational failure detected on read, never silently normalized.
+   Checks: digest is a well-formed sha256:<64hex> identity; media_type is
+   a non-blank restricted-charset label; size_bytes is a non-negative
+   integer; retention is one of retained|expired|superseded; location is a
+   non-blank string; recorded_seq is an integer >= -1 (-1 reads back as
+   nil, meaning no recording event). Content itself cannot be re-verified
+   here: the ledger stores digests, never payload bytes, so a tampered
+   digest that is still well-formed sha256:<64hex> is indistinguishable
+   from a legitimately recorded different artifact at the row level —
+   content-level checking belongs at the record boundary (the optional
+   :artifact/bytes cross-check) and in caller-held bytes."
+  [row]
+  (let [digest (:digest row)
+        media-type (:media_type row)
+        size (:size_bytes row)
+        retention (:retention row)
+        location (:location row)
+        recorded-seq (:recorded_seq row)]
+    (when-not (artifact-digest? digest)
+      (operational! "Stored artifact digest is malformed"
+                    {:reason :malformed-artifact-row :column :digest}))
+    (when-not (media-type? media-type)
+      (operational! "Stored artifact media type is malformed"
+                    {:reason :malformed-artifact-row :column :media_type}))
+    (when-not (non-negative-long? size)
+      (operational! "Stored artifact size is malformed"
+                    {:reason :malformed-artifact-row :column :size_bytes}))
+    (when-not (contains? #{"retained" "expired" "superseded"} retention)
+      (operational! "Stored artifact retention status is malformed"
+                    {:reason :malformed-artifact-row :column :retention}))
+    (when-not (and (string? location) (not (str/blank? location)))
+      (operational! "Stored artifact location is malformed"
+                    {:reason :malformed-artifact-row :column :location}))
+    (when-not (and (integer? recorded-seq) (<= unrecorded-seq recorded-seq Long/MAX_VALUE))
+      (operational! "Stored artifact recorded-seq is malformed"
+                    {:reason :malformed-artifact-row :column :recorded_seq}))
+    {:artifact/digest digest
+     :artifact/media-type media-type
+     :artifact/size-bytes (long size)
+     :artifact/retention (keyword retention)
+     :artifact/location location
+     :artifact/recorded-seq (when (>= (long recorded-seq) 0) (long recorded-seq))}))
+
+(def ^:private artifact-columns
+  "digest, media_type, size_bytes, retention, location, recorded_seq")
+
+(declare read-artifact)
+
+(defn record-artifact!
+  "Records an artifact row. artifact is a map with:
+     :artifact/digest        required, sha256:<64hex> (content identity)
+     :artifact/media-type    optional validated label, default
+                             application/octet-stream
+     :artifact/size-bytes    required, non-negative integer
+     :artifact/retention     optional :retained|:expired|:superseded
+                             (keyword or string), default :retained
+     :artifact/location      required, non-blank location reference
+     :artifact/recorded-seq  optional ledger seq of the recording event,
+                             or nil (default) for unrecorded — stored as
+                             the -1 sentinel, reads back as nil
+     :artifact/bytes         optional exact bytes; when supplied the
+                             digest and size are cross-checked against
+                             them (mismatch is :invalid)
+   bounds is the caller-declared retention bounds map
+   {:max/artifact-bytes N :max/retained-artifacts M}. Exceeding either
+   bound is an operational failure with the bound and the reason named —
+   never a truncated success. A duplicate digest is rejected
+   deterministically (:duplicate / :duplicate-artifact-digest). The
+   retained-artifacts bound counts rows with retention 'retained';
+   expired and superseded rows do not count. Insert and bound checks run
+   in one transaction. Returns the recorded artifact map."
+  [handle bounds artifact]
+  (validate-bounds! bounds)
+  (let [row (normalize-artifact-row! artifact)
+        max-bytes (long (:max/artifact-bytes bounds))
+        max-retained (long (:max/retained-artifacts bounds))
+        ^Connection conn (:connection handle)]
+    (when (> (:size-bytes row) max-bytes)
+      (operational! "Artifact payload exceeds the declared byte bound"
+                    {:reason :max-artifact-bytes-exceeded
+                     :bound max-bytes :actual (:size-bytes row)
+                     :digest (:digest row)}))
+    (try
+      (with-tx conn
+        (fn []
+          (try
+            (with-open [stmt (.prepareStatement conn
+                              (str "INSERT INTO artifacts (" artifact-columns ") "
+                                   "VALUES (?, ?, ?, ?, ?, ?)"))]
+              (doseq [[i p] (map-indexed vector
+                                         [(:digest row) (:media-type row) (:size-bytes row)
+                                          (:retention row) (:location row) (:recorded-seq row)])]
+                (.setObject ^PreparedStatement stmt (inc i) p))
+              (.executeUpdate stmt))
+            (catch SQLException e
+              (if (re-find #"UNIQUE constraint failed: artifacts\.digest" (str (.getMessage e)))
+                (throw (ex-info "Duplicate artifact digest rejected"
+                                {:axiom/error :duplicate
+                                 :reason :duplicate-artifact-digest
+                                 :digest (:digest row)}))
+                (throw e))))
+          (let [retained (long (:n (query-one conn
+                                     "SELECT COUNT(*) AS n FROM artifacts WHERE retention='retained'"
+                                     [])))]
+            (when (> retained max-retained)
+              (operational! "Retained artifact count exceeds the declared bound"
+                            {:reason :max-retained-artifacts-exceeded
+                             :bound max-retained :actual retained
+                             :digest (:digest row)})))
+          ;; Re-read the committed row so the returned map has passed the
+          ;; same read-back validation as any later read.
+          (row->artifact (query-one conn
+                           (str "SELECT " artifact-columns " FROM artifacts WHERE digest=?")
+                           [(:digest row)]))))
+      (catch clojure.lang.ExceptionInfo e (throw e))
+      (catch SQLException e
+        (operational! "Artifact record failed" {:cause (str e)})))))
+
+(defn mark-artifact!
+  "Sets the retention status of the artifact row for digest to
+   :retained, :expired or :superseded (keyword or string). Rows are
+   marked, never deleted, so past decisions stay reproducible. Returns
+   the updated artifact map. A well-formed but unknown digest is invalid
+   input (:unknown-artifact)."
+  [handle digest retention]
+  (when-not (artifact-digest? digest)
+    (model/invalid! "Invalid artifact digest" {:digest digest}))
+  (let [status (retention-status retention)]
+    (when-not status
+      (model/invalid! "Invalid artifact retention status" {:retention retention}))
+    (let [^Connection conn (:connection handle)
+          updated (with-open [stmt (.prepareStatement conn
+                                     "UPDATE artifacts SET retention=? WHERE digest=?")]
+                    (.setString ^PreparedStatement stmt 1 (name status))
+                    (.setString ^PreparedStatement stmt 2 digest)
+                    (.executeUpdate stmt))]
+      (when (zero? updated)
+        (model/invalid! "Unknown artifact digest"
+                        {:reason :unknown-artifact :digest digest}))
+      (read-artifact handle digest))))
+
+(defn read-artifact
+  "Reads the artifact row for digest, or nil when no such row exists.
+   The stored row passes read-back validation; a malformed column is an
+   operational failure detected on read."
+  [handle digest]
+  (when-not (artifact-digest? digest)
+    (model/invalid! "Invalid artifact digest" {:digest digest}))
+  (let [^Connection conn (:connection handle)
+        row (query-one conn
+               (str "SELECT " artifact-columns " FROM artifacts WHERE digest=?")
+               [digest])]
+    (when row (row->artifact row))))
+
+(defn list-artifacts
+  "Lists artifact rows ordered by digest, each validated on read.
+   Optional filter {:retention :retained|:expired|:superseded}."
+  ([handle] (list-artifacts handle {}))
+  ([handle opts]
+   (let [filter-status (when (contains? opts :retention)
+                         (or (retention-status (:retention opts))
+                             (model/invalid! "Invalid artifact retention filter"
+                                             {:retention (:retention opts)})))
+         ^Connection conn (:connection handle)
+         [sql params] (if filter-status
+                        [(str "SELECT " artifact-columns
+                              " FROM artifacts WHERE retention=? ORDER BY digest")
+                         [(name filter-status)]]
+                        [(str "SELECT " artifact-columns " FROM artifacts ORDER BY digest")
+                         []])]
+     (mapv row->artifact (query-all conn sql params)))))
