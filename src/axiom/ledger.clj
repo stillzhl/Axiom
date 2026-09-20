@@ -1,12 +1,15 @@
 (ns axiom.ledger
-  "Pure durable-ledger port (spec 0002). No I/O, no database access: event
-   envelope construction and validation, hash-chain verification, world
-   reduction over stored envelopes, snapshot construction and verification,
-   replay reports and decision export bundles. The SQLite adapter lives in
-   axiom.store; this namespace never touches it."
+  "Pure durable-ledger port (spec 0002), extended with observation and
+   evidence record kinds (spec 0003 R6). No I/O, no database access:
+   event envelope construction and validation, hash-chain verification,
+   world reduction over stored envelopes, snapshot construction and
+   verification, replay reports and decision export bundles. The SQLite
+   adapter lives in axiom.store; this namespace never touches it."
   (:require [axiom.contract :as contract]
+            [axiom.git :as git]
             [axiom.model :as model]
             [axiom.nomos :as nomos]
+            [axiom.runner :as runner]
             [axiom.world :as world]
             [clojure.string :as str]))
 
@@ -51,6 +54,36 @@
 
 (def ^:private stored-envelope-fields (conj envelope-fields :seq))
 
+(defn- validate-observation-record!
+  "Strict validation of an :observation payload: the exact record shape,
+   plus the pure `axiom.git` port's observation validation. Unknown or
+   malformed observations are rejected (:invalid) and can never be
+   written. The trust check is explicit here as well as in the port:
+   local observations can never masquerade as trusted remote CI (R5)."
+  [payload]
+  (shape! payload #{:record/kind :observation} :observation-record)
+  (let [observation (:observation payload)]
+    (ensure! (map? observation) "Observation record must carry an observation" {})
+    (ensure! (= :trust/local-diagnostic (:trust observation))
+             "Observation must carry local-diagnostic trust" {})
+    (git/validate-observation! observation))
+  payload)
+
+(defn- validate-evidence-record!
+  "Strict validation of an :evidence-record payload: the exact record
+   shape, plus the pure `axiom.runner` port's run-record validation.
+   Unknown or malformed evidence is rejected (:invalid) and can never
+   be written. Trust forgery (anything but :trust/local-diagnostic) is
+   rejected here and in the port (R5)."
+  [payload]
+  (shape! payload #{:record/kind :evidence} :evidence-record)
+  (let [evidence (:evidence payload)]
+    (ensure! (map? evidence) "Evidence record must carry a run record" {})
+    (ensure! (= :trust/local-diagnostic (:trust evidence))
+             "Evidence must carry local-diagnostic trust" {})
+    (runner/validate-run-record! evidence))
+  payload)
+
 (defn validate-envelope!
   "Strict validation of a caller-supplied envelope (pre-store, no :seq).
    Unknown or malformed required inputs are rejected and therefore never
@@ -78,6 +111,8 @@
                     (ensure! (map? (:scenario payload)) "Scenario record must carry a scenario" {}))
       :event (do (shape! payload #{:record/kind :event} :event-record)
                  (ensure! (map? (:event payload)) "Event record must carry an event" {}))
+      :observation (validate-observation-record! payload)
+      :evidence-record (validate-evidence-record! payload)
       (model/invalid! "Unknown record kind" {:record/kind (:record/kind payload)})))
   envelope)
 
@@ -137,6 +172,39 @@
                           :payload {:record/kind :event :event event})]
       (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope)))))))
 
+(defn record-observation
+  "Pure construction of the envelope to store for a local Git
+   observation. The observation is validated with the pure `axiom.git`
+   port — unknown or malformed observations are :invalid and can never
+   be written, and any trust level other than :trust/local-diagnostic
+   is rejected (R5). The envelope's :candidate/id is the content digest
+   of the observation (`axiom.model/candidate-id`): Axiom never invents
+   a candidate identity. Returns the envelope without :seq; the store
+   assigns the sequence transactionally."
+  [prev-envelope {:keys [observation] :as inputs}]
+  (ensure! (map? observation) "record-observation requires an observation map" {})
+  (git/validate-observation! observation)
+  (let [envelope (assoc (base-envelope prev-envelope inputs)
+                        :candidate/id (model/candidate-id observation)
+                        :payload {:record/kind :observation :observation observation})]
+    (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope))))))
+
+(defn record-evidence
+  "Pure construction of the envelope to store for a runner Evidence
+   record. The record is validated with the pure `axiom.runner` port —
+   unknown or malformed evidence is :invalid and can never be written,
+   and any trust level other than :trust/local-diagnostic is rejected
+   (R5). The envelope's :candidate/id is the content digest of the
+   evidence (`axiom.model/candidate-id`). Returns the envelope without
+   :seq; the store assigns the sequence transactionally."
+  [prev-envelope {:keys [evidence] :as inputs}]
+  (ensure! (map? evidence) "record-evidence requires an evidence record map" {})
+  (runner/validate-run-record! evidence)
+  (let [envelope (assoc (base-envelope prev-envelope inputs)
+                        :candidate/id (model/candidate-id evidence)
+                        :payload {:record/kind :evidence-record :evidence evidence})]
+    (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope))))))
+
 (defn stored-envelope!
   "Validation of an envelope read back from storage. Stored corruption is
    an operational failure, never an input problem."
@@ -154,11 +222,15 @@
         (throw e)))))
 
 (defn extract-events
-  "The 0001 events an envelope contributes to the world fold, in order."
+  "The 0001 events an envelope contributes to the world fold, in order.
+   Observations and evidence records are provenance, not world events:
+   they contribute zero 0001 events, so 0001/0002 decision bytes are
+   unchanged by their presence."
   [envelope]
   (case (get-in envelope [:payload :record/kind])
     :scenario (vec (get-in envelope [:payload :scenario :events]))
     :event [(get-in envelope [:payload :event])]
+    (:observation :evidence-record) []
     (operational! "Unknown record kind in stored envelope"
                   {:record/kind (get-in envelope [:payload :record/kind])})))
 
@@ -273,6 +345,17 @@
                            [(ledger-world ordered) nil]))
                        [(ledger-world ordered) nil])
         entries (scenario-entries ordered)
+        ;; Observations and evidence are provenance for the decisions:
+        ;; each entry carries its sequence, event ID and the recorded
+        ;; map, so a replay shows what was observed and evidenced.
+        observations (mapv (fn [env] {:seq (:seq env)
+                                      :event/id (:event/id env)
+                                      :observation (get-in env [:payload :observation])})
+                           (filterv #(= :observation (get-in % [:payload :record/kind])) ordered))
+        evidence (mapv (fn [env] {:seq (:seq env)
+                                  :event/id (:event/id env)
+                                  :evidence (get-in env [:payload :evidence])})
+                       (filterv #(= :evidence-record (get-in % [:payload :record/kind])) ordered))
         decisions (mapv (fn [{:keys [seq recorded recomputed] :as entry}]
                           {:seq seq :event/id (:event/id entry)
                            :decision/id (:decision/id recorded)
@@ -289,6 +372,8 @@
      :world/digest (model/digest world)
      :world/revision (:revision world)
      :decisions decisions
+     :observations observations
+     :evidence evidence
      :snapshot/used (when used (select-keys used [:snapshot/seq :reducer/version :world/digest]))
      :snapshot/ignored? (boolean (and usable (nil? used)))
      :limitations report-limitations}))

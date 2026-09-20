@@ -368,10 +368,13 @@
 (defn- artifact-digest? [value]
   (and (string? value) (boolean (re-matches #"sha256:[0-9a-f]{64}" value))))
 
-(defn- media-type? [value]
-  ;; Non-blank validated label with a restricted character set, in the
-  ;; shape of the existing id? predicate (plus '+' for suffixes such as
-  ;; application/atom+xml). Content label, never a trust statement.
+(defn media-type?
+  "A media type is a non-blank validated label with a restricted
+   character set, in the shape of the existing id? predicate (plus '+'
+   for suffixes such as application/atom+xml). Content label, never a
+   trust statement. Pure; reused by the `digest` CLI for --media-type
+   validation."
+  [value]
   (and (string? value)
        (boolean (re-matches #"[A-Za-z0-9][A-Za-z0-9._/+.-]{0,127}" value))))
 

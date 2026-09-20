@@ -4,10 +4,11 @@ State: spec authored and Accepted 2026-09-20; implementation in
 progress — slice 1 (T1+T2, git observation port + adapter) landed
 2026-09-20, slice 2 (T3, artifact digesting + `artifacts` table, schema
 v3) landed 2026-09-20, slice 3 (T4, diagnostic runner port + adapter)
-landed 2026-09-20. This spec (0003) is NOT Verified, and no M2
-milestone or Axiom v1 acceptance is claimed from it. Verification of
-the implementation will be recorded here when a future implementation
-slice lands.
+landed 2026-09-20, slice 4 (T5, CLI surface + T6,
+observation/evidence ledger integration) landed 2026-09-20. This spec
+(0003) is NOT Verified, and no M2 milestone or Axiom v1 acceptance is
+claimed from it. Verification of the implementation will be recorded
+here when a future implementation slice lands.
 
 ## Spec acceptance evidence — 2026-09-20
 
@@ -384,6 +385,139 @@ Recorded deviations and limits:
   the git-side adversarial tests and the 0003 check-script gates
   (T8) do not exist yet. The spec as a whole is still NOT Verified.
 
+## Slice 4 evidence — T5 CLI surface + T6 observation/evidence ledger integration, 2026-09-20
+
+Branch `feat/0003-cli-observation-ledger`, one focused PR per the Axiom
+autopilot (never pushed directly to `main`). No HomeKV-specific
+content; all fixtures synthetic.
+
+Delivered:
+
+- `src/axiom/cli.clj` — three thin commands following the existing
+  strict operand-matching style (a separate 0003 usage text; the
+  0001/0002 usage text and all 0001/0002 exit behaviors are
+  byte-identical):
+  - `observe-git --repo PATH [--base REV]`: calls
+    `axiom.adapters.git/observe!` and emits the EDN observation report.
+    Exit 0 when the observation is `:complete`; exit 5 when it is
+    `:incomplete` (the failing step is named in the report — still an
+    honest EDN report, but the observation failed operationally, R7).
+    Missing repository is `:invalid` → 4; path-traversal rejection is
+    `:operational` → 5, via the shared `:invalid` → 4 / else → 5
+    mapping. Read-only: never creates or migrates ledger files, never
+    mutates the observed repository.
+  - `digest --path FILE [--media-type TYPE]`: SHA-256 over the exact
+    file bytes (`axiom.model/sha256-bytes`), validated media type
+    (`axiom.store/media-type?`, now public; default
+    `application/octet-stream`), byte size and location reference.
+    Missing file / not-a-file / bad media type → 4; unreadable file →
+    5. Read-only: never creates or migrates ledger files. Digest
+    matches `sha256sum` on the same bytes (verified in tests and by
+    hand on the CLI).
+  - `run --command ID [--args k=v ...]`: loads the checked-in
+    registry, coerces `k=v` string operands to the slots' declared
+    types (integer slots parse as longs; string/enum slots pass
+    through for the pure port to validate), executes via
+    `axiom.adapters.runner/run!` against the registry's configured
+    working directory, and emits the Evidence record. Unknown command
+    ID, malformed `k=v`, duplicate keys, or slot violations → 4; a
+    completed run (pass or fail) → 0; a timeout/cancellation/output-cap
+    yields the honest `:incomplete` record naming the bound and exits 5
+    (R7).
+- `src/axiom/ledger.clj` — T6 ledger integration:
+  - New payload record kinds `:observation` (`{:record/kind :observation
+    :observation <git observation map>}`) and `:evidence-record`
+    (`{:record/kind :evidence-record :evidence <run record>}`), each
+    with strict exact-shape validation plus the pure ports'
+    validators (`axiom.git/validate-observation!`,
+    `axiom.runner/validate-run-record!`). Unknown or malformed
+    observations/evidence are `:invalid` and can never be written.
+  - Pure constructors `ledger/record-observation` and
+    `ledger/record-evidence` in the 0002 `record-event` pattern
+    (inputs carry `:event/id :stream/id :dedup/key :producer`,
+    `:observed/time :ingested/time`); `:candidate/id` is the content
+    digest of the observation/evidence via `axiom.model/candidate-id`
+    — Axiom never invents a candidate identity.
+  - Trust anti-masquerade (R5): any trust level other than
+    `:trust/local-diagnostic` is rejected, checked explicitly in the
+    ledger as well as in the ports.
+  - `extract-events` / `ledger-world` treat the new kinds as zero 0001
+    events (observations are provenance, not world events):
+    0001/0002 decision bytes and the world digest are unchanged by
+    their presence (asserted in tests).
+  - `replay-report` gains `:observations` and `:evidence` entries
+    (seq, event-id, and the record), so a replay shows the
+    observations and evidence behind each decision. Snapshots cover
+    the new envelopes by sequence with no special-casing; bundles
+    carry them as ordinary envelopes.
+  - `:event/id` and `dedup/key` reuse are rejected deterministically
+    by the existing store behavior (`:duplicate`).
+- `src/axiom/store.clj` — `media-type?` made public (pure predicate)
+  for the CLI's `--media-type` validation; no behavior change.
+- `src/axiom/model.clj` — `edn-str` now binds
+  `*print-namespace-maps* false`: `pr-str` otherwise emits `#:` reader
+  macros for uniformly-namespaced maps (e.g. an observation's
+  `:producer`), which the strict contract reader rejects — stored
+  observation/evidence payloads would have failed to round-trip
+  through the store. Byte-identical for all existing 0002 payloads
+  (none contain namespace-map forms).
+- `src/axiom/cli.clj` `-main` — same binding for printed EDN output so
+  CLI reports are readable by `contract/read-data`; byte-identical for
+  the 0001/0002 reports (verified: no `#:` in current outputs).
+- `test/axiom/observations_test.clj` (new, registered in
+  `test_runner`): malformed observation/evidence cannot be recorded
+  (`:invalid`); trust forgery (`:trust/remote-ci`) rejected for both
+  kinds; observation + evidence (from a real `/bin/true` runner run)
+  recorded through a real SQLite ledger replay with the records
+  present, `:reproduced? true`, and the world digest identical to the
+  scenario-only ledger; `:event/id`/`dedup/key` reuse → `:duplicate`;
+  CLI exit codes on synthetic inputs — `observe-git` valid → 0,
+  missing repo → 4, malformed/trailing operands → 4, non-repo dir →
+  5 with `:incomplete` report; `digest` valid → 0 with digest equal to
+  `sha256sum`, bad media type / missing file / directory → 4;
+  `run true-probe` → 0, unknown command / malformed `k=v` / duplicate
+  keys / slot violation → 4, `sleep-probe seconds=30` (5s timeout) →
+  5 with `:timed-out` / `:timeout-seconds` / `:incomplete`.
+
+Test results:
+
+- `./scripts/check` (Temurin 17.0.20, Clojure 1.12.0): **72 tests,
+  1257 assertions, 0 failures, 0 errors** — up from the 65/1169
+  baseline (+7 tests, +88 assertions). All 0001/0002 CLI gates
+  (evaluate allow 0 / missing 3 / stale 3 / failed 2;
+  status/next/explain exit 0; replay/export-bundle 0/4/5) pass;
+  `git diff --check` clean.
+
+Recorded deviations and limits:
+
+- The design's "new event schema kind `:event/observation` and
+  `:event/evidence`" language is realized as envelope payload
+  `:record/kind` values `:observation` and `:evidence-record` within
+  the existing 0002 envelope schema (additive; no envelope-schema
+  version bump), per the implementation brief's concrete shapes. The
+  0002 schema-1/2 semantics are otherwise unchanged.
+- `observe-git` on a git step failure returns the adapter's validated
+  `:incomplete` observation (naming the failing step) with exit 5 —
+  the report is honest EDN, but the observation itself failed
+  operationally (R7 "git failure → 5").
+- `run` emits the Evidence record even when it is `:incomplete`
+  (timeout/cancellation/output-cap) and exits 5: the record names the
+  violated bound, following the 0002 precedent of emitting the report
+  while the exit code carries the status (cf. `evaluate` deny → 2).
+- Retention-bound failures cannot arise in the `run` CLI in this
+  slice: the command writes to no ledger, so no retention bounds
+  apply; the exit-5 path covers timeout/cancellation/output-cap with
+  the reason named in `:run/bound-exceeded`.
+- The CLI `run` coerces `k=v` operands to slot types because the
+  shell delivers strings; integer slots that do not parse are
+  `:invalid` (exit 4). Unknown argument names still fail in the pure
+  port (exit 4).
+- Timestamps remain absent from run records (slice 3 decision);
+  observation/evidence ledger events carry observed/ingested times.
+- T7 (adversarial/boundary tests) and T8 (0003 `scripts/check` gates)
+  remain open. The spec as a whole is still NOT Verified, and no M2
+  milestone or Axiom v1 acceptance is claimed.
+
 ## Limits and deferred work
 
 - Implementation is in progress: `axiom.git` and
@@ -391,7 +525,8 @@ Recorded deviations and limits:
   digesting and the `artifacts` table (schema v3) landed in slice 2
   (2026-09-20); `axiom.runner` and `axiom.adapters.runner` landed in
   slice 3 (2026-09-20); the `observe-git`/`digest`/`run` CLI commands
-  do not exist yet.
+  and the `:observation`/`:evidence-record` ledger integration landed
+  in slice 4 (2026-09-20).
 - The local ledger remains single-process and tamper-evident, not
   tamper-proof (0002 R9, unchanged).
 - Inputs are unauthenticated; local observations and runner results are

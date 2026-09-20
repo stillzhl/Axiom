@@ -5,6 +5,7 @@
             [axiom.ledger-test]
             [axiom.store-test]
             [axiom.artifacts-test]
+            [axiom.observations-test]
             [axiom.runner-test]))
 
 (defn -main [& _]
@@ -13,6 +14,7 @@
                                              'axiom.ledger-test
                                              'axiom.store-test
                                              'axiom.artifacts-test
+                                             'axiom.observations-test
                                              'axiom.runner-test)]
     (shutdown-agents)
     (System/exit (if (zero? (+ fail error)) 0 1))))

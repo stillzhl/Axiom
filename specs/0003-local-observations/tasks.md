@@ -39,16 +39,43 @@
   synthetic probes only; `run!`/`start!`/`cancel!` adapter API;
   `:run/complete? false` / `:run/result :incomplete` on every
   non-completed outcome.)
-- [ ] T5: Implement `axiom.cli observe-git` (`--repo PATH [--base REV]`),
+- [x] T5: Implement `axiom.cli observe-git` (`--repo PATH [--base REV]`),
   `axiom.cli digest` (`--path FILE`), `axiom.cli run` (`--command ID
   [--args ...]`): thin adapters over the pure paths; EDN reports; exit
   0/4/5 contract per R7; `observe-git` and `digest` never create or
   migrate ledger files and never mutate the observed repository.
-- [ ] T6: Wire observations into the ledger: `:event/observation` and
-  `:event/evidence` schema kinds validated by `axiom.ledger`, recorded
-  through the 0002 append path (hash-chained, deduplicated, replay
-  ordered), referenced in snapshots/bundles by artifact digest; replay
-  shows the observations and evidence behind each decision.
+  (Landed 2026-09-20, slice 4: PR "feat: implement 0003 CLI surface
+  and observation/evidence ledger integration". Strict operand
+  matching with a separate 0003 usage text (the 0001/0002 usage text
+  is byte-identical); `:invalid` -> 4, anything else -> 5 via the
+  shared mapping. `observe-git` emits the adapter's validated report:
+  exit 0 when `:complete`, exit 5 when `:incomplete` (the failing step
+  is named in the report). `digest` emits the artifact digest record
+  (SHA-256 over exact bytes via `axiom.model/sha256-bytes`, validated
+  `--media-type`, default `application/octet-stream`, byte size);
+  `run` coerces `k=v` operands to the slots' declared types and exits 0
+  on a completed run, 5 on an `:incomplete` record (timeout /
+  output-cap, bound named). The 0001/0002 exit contracts are
+  byte-identical.)
+- [x] T6: Wire observations into the ledger: new `:observation` and
+  `:evidence-record` payload record kinds validated by `axiom.ledger`,
+  recorded through the 0002 append path (hash-chained, deduplicated,
+  replay ordered), referenced in snapshots/bundles by artifact digest;
+  replay shows the observations and evidence behind each decision.
+  (Landed 2026-09-20, slice 4: same PR as T5. New payload record kinds
+  `:observation` (`{:record/kind :observation :observation <git
+  observation>}`) and `:evidence-record` (`{:record/kind
+  :evidence-record :evidence <run record>}`) with exact-shape
+  validation plus the pure ports' validators; pure constructors
+  `ledger/record-observation` and `ledger/record-evidence` (candidate
+  ID is the content digest via `axiom.model/candidate-id`); trust
+  forgery (anything but `:trust/local-diagnostic`) is `:invalid`;
+  `extract-events`/`ledger-world` treat the new kinds as zero 0001
+  events (0001/0002 decision bytes unchanged); `replay-report` gains
+  `:observations` and `:evidence` entries (seq, event-id, record);
+  snapshots cover them by sequence with no special-casing; `:event/id`
+  and `dedup/key` reuse rejected deterministically by the existing
+  store behavior.)
 - [ ] T7: Adversarial and boundary tests: symlinks escaping the worktree
   reported `:path/unsafe` and excluded from digestion; submodules not
   recursed; `..`-escaping paths rejected operationally; dirty worktree
