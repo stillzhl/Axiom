@@ -158,6 +158,85 @@ adapter-level credential contract (env/token-file options, raw token
 rejection) is done here. No milestone Verified claim is made from
 this slice.
 
+## Slice 3 implementation evidence — 2026-09-20
+
+Branch `feat/0004-github-cli-ledger`: T5 CLI plus T6 ledger
+integration. Synthetic fixtures only; no network, no live
+credentials, no real repository identities (invented
+`synth-org/synth-repo`, synthetic 40-hex SHAs, `synth-*` logins,
+`synth-token-*` credentials); nothing HomeKV-specific.
+
+New files:
+
+- `test/axiom/github_cli_ledger_test.clj` — 11 synthetic-only tests
+  (T5 CLI argument parsing and exit codes, fixture-mode observations
+  anonymous and authenticated, `--sha` head pinning, operational
+  failure mapping, CLI read-only guarantee, T6 ledger append/replay/
+  trust validation/dedup, CLI replay of provider observations,
+  snapshot and export-bundle inclusion, deterministic fixture
+  replay).
+
+Edited:
+
+- `src/axiom/cli.clj` — `observe-github --repo OWNER/NAME --pr N
+  [--sha SHA] [--token-file PATH]` and `check-pr --repo OWNER/NAME
+  --pr N [--token-file PATH]`: thin adapters over the pure
+  `axiom.adapters.github/observe!` and `axiom.github/check-pr` paths.
+  EDN reports on stdout. Exit contract per R7: 0 on a complete valid
+  report, 4 on invalid input (malformed repo slug, bad PR number,
+  unknown/bogus flags, duplicate flags, bad SHA shape, unreadable
+  token file, `--sha` mismatch against the observed head), 5 on
+  operational failure (terminal API error, incomplete observation,
+  stale cache). `--token-file` reads the token from a file;
+  otherwise the adapter resolves `AXIOM_GITHUB_TOKEN`. Raw tokens are
+  never accepted as arguments. An `AXIOM_GITHUB_FIXTURES` hook
+  injects the port's fixture fetch for offline runs (used by the
+  test suite; no network). `check-pr` uses the default generic gates
+  `:pr-identity`, one required approval, `:merge-state`; the
+  advisory-only `can-merge` summary is emitted, never enforcement.
+  Neither command opens, migrates or writes ledger files
+  (test-redefined store writes throw; both commands still exit 0).
+- `src/axiom/ledger.clj` — `record-observation` now dispatches on
+  `:observation/kind`: `:git-observation` keeps requiring
+  `:trust/local-diagnostic`; `:github-observation` accepts only
+  `:trust/provider-observed` / `:trust/provider-authenticated`.
+  `:trust/remote-ci`, unknown kinds, malformed observations and
+  trust-kind mismatches are `:invalid` and can never be written.
+  The 0002 append path (transactional sequence, hash chain,
+  event-id/dedup-key dedup, snapshots, export bundles) is unchanged.
+- `test/axiom/test_runner.clj` — registers the new test namespace.
+
+Evidence:
+
+- `git diff --check` — clean.
+- `./scripts/check` (Temurin 17.0.20, Clojure 1.12.0): **133 tests,
+  1627 assertions, 0 failures, 0 errors** — up from the Slice 2
+  baseline (122 tests, 1527 assertions). All 0001/0002/0003 CLI gates
+  unchanged and passing (evaluate allow 0 / missing 3 / stale 3 /
+  failed 2; status/next/explain exit 0; replay/export-bundle 0/4/5;
+  ledger tamper gate exit 5; observe-git/digest/run 0/4/5).
+
+Honest limits:
+
+- `observe-github` requires `--pr` in this slice. R7 writes the flag
+  as `[--pr N]` (optional), but the 0004 observation schema and
+  adapter (T1–T4) are PR-centric — a repo-at-SHA observation without
+  a PR has no defined observation shape — so the CLI rejects a
+  missing `--pr` as invalid input (exit 4). Repo-level observation
+  is deferred, not silently supported.
+- `check-pr`'s default gates are generic (`:pr-identity`, one
+  required approval, `:merge-state`); `:required-checks` needs
+  repository-specific job names the CLI has no input for. Pure
+  consumers call `axiom.github/check-pr` with explicit gates.
+- No `check-pr` report is persisted as a ledger decision record:
+  the advisory report is recomputed byte-identically from the
+  replayed observation (tested), which is the honest form of
+  "fixture-recorded decisions replay offline" for an advisory-only
+  command.
+
+Tasks: T5 and T6 are complete. No milestone Verified claim is made
+from this slice.
+
 ## Limits and deferred work
 
 - Test evidence is bounded (synthetic fixtures), not a formal proof or
@@ -172,6 +251,6 @@ this slice.
 - Self-hosting is planned with independent evaluator/policy promotion
   gates; Axiom did not drive this spec run.
 - The network adapter (`axiom.adapters.github`, T2) and token/producer
-  identity plumbing (T3) landed in Slice 2 above. CLI (T5), ledger
-  wiring (T6), adversarial fixture tests (T7), and 0004
-  `scripts/check` gates (T8) remain.
+  identity plumbing (T3) landed in Slice 2 above; CLI (T5) and ledger
+  wiring (T6) landed in Slice 3 above. Adversarial fixture tests (T7)
+  and 0004 `scripts/check` gates (T8) remain.
