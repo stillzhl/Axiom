@@ -236,3 +236,122 @@ Honest limits:
   authorization.
 - Approved-policy fixtures in this spec are synthetic and generic;
   real consumer policies live in consumer repositories.
+
+## Slice 3 evidence — T4/T5 implemented (2026-09-20)
+
+Branch `feat/0005-checks-adapter` (PR: see merge record below). This
+slice implements tasks T4 and T5 only; T6 (CLI), T7 (adversarial
+tests), T8 (verification/acceptance review) remain open. Spec status
+remains **Accepted** — nothing is claimed Verified, and no M4
+milestone acceptance is claimed from this slice.
+
+What landed:
+
+- `src/axiom/adapters/checks.clj` — the only provider-mutating
+  namespace (T4), behind the `axiom.gate` port, using
+  `java.net.http.HttpClient` (no new production dependencies).
+  `construct!` requires a passing R8 capability record
+  (`constructable?` is the pure, network-free refusal predicate:
+  `:mode :enforcement`, the three R8 answers true, evaluator
+  identity matching); without one the adapter refuses to construct
+  as an operational refusal. The single write operation `publish!`
+  publishes a check run bound to the exact candidate identity (repo
+  slug, PR number, base/head/tree SHAs) and the configured
+  evaluator identity. Identity binding is enforced, never silently
+  corrected: an evaluator mismatch or a candidate-identity mismatch
+  (including a candidate repo outside the adapter's configured
+  target repository) is an operational failure with zero writes
+  attempted; an `:invalid` decision cannot be published. The run's
+  external ID is `axiom-gate/<sha256>` over exactly the idempotency
+  triple (candidate identity, gate set, policy digest), so
+  republishing the same evaluation updates one logical run
+  (create-then-update) instead of duplicating; the output summary
+  always names the evaluator identity, the policy digest with its
+  approval event, the exact candidate identity, the decision and
+  the named reasons, and the full decision digest travels in the
+  run body for audit. There are no code paths for any other
+  provider mutation: the only mutating operations in the namespace
+  are `:checks/create-run!` / `:checks/update-run!`, called only
+  from `publish!` (the list read is locate-only for the idempotent
+  upsert). A fake in-memory Checks API records every attempted
+  write (inspectable `:checks/attempts` atom) and stores runs keyed
+  by external ID; the real `github-checks-api` write path (create
+  POST, update PATCH, locate by external ID over the head SHA's
+  runs) is present but never exercised by tests — no test opens a
+  socket or requires live network.
+- `src/axiom/capability.clj` — pure R8 logic (T5):
+  `compute-capability` from the three R8 answers (any no, or a
+  non-boolean answer, yields `:mode :advisory` with
+  `:capability/advisory-reasons` naming each failed answer:
+  `:no-checks-write`, `:protection-unreadable`,
+  `:protections-unconfigurable`); `advisory-report` carries the
+  evaluation with `:report/provider-writes 0` and
+  `:report/enforcement-claimed false` — enforcement is never
+  claimed. Trusted observation extension shapes:
+  `protection-observation` (required checks by provider-assigned
+  check-run ID — display titles are dropped, never consulted;
+  required approval count; dismiss-stale-reviews and
+  enforce-admins flags), `merge-group-candidate` (merge-group head
+  SHA plus grouped PR identities, for providers offering merge
+  queues), and `admin-bypass-event` (`:governance/admin-bypass`
+  with actor and reason, both required).
+- `axiom.gate/report-bypassed` — the pure `:bypassed` gate-level
+  outcome (T5): a bypassed gate reports `:bypassed` with
+  `:gate/bypass` naming actor and reason, never `:allow`; an
+  `:invalid` decision stays `:invalid` (a bypass cannot validate an
+  evaluation that never ran); a bypass event without actor and
+  reason is malformed input.
+- `specs/0005-enforced-gate/tasks.md`: T4 and T5 marked `[x]`.
+
+Evidence:
+
+- `git diff --check` — clean (runs inside `./scripts/check`).
+- `./scripts/check` (Temurin 17.0.20, Clojure 1.12.0): **196 tests,
+  1963 assertions, 0 failures, 0 errors** — the slice-2 baseline of
+  176 tests / 1834 assertions plus 20 new tests / 129 new
+  assertions: `test/axiom/checks_test.clj` (12 tests — construction
+  refusal, publication binding, idempotency, external-ID
+  determinism, candidate/evaluator mismatch failures, invalid
+  decision refusal, conclusion mapping, advisory fallback with
+  zero writes, publication-only op set) and
+  `test/axiom/capability_test.clj` (8 tests — R8 computation
+  including every single-no and multi-no case, advisory report
+  shape, protection observation shape, merge-group candidate
+  shape, admin-bypass event and the `:bypassed` outcome). All
+  0001–0004 CLI gates pass unchanged.
+- No HomeKV-specific content: all fixtures synthetic (`synth-*`
+  repos, SHAs, logins, digests); no real repository identities,
+  no live credentials, no network in tests.
+
+Protection assumptions (R6, documented minimally per T5): the
+deployment assumes the provider exposes branch-protection state
+readable by the evaluator's credential and that the owner can
+configure required protections; the gate reads required checks by
+provider-assigned check-run ID (never display name), required
+approval count, dismiss-stale-reviews and enforce-admins flags.
+When the provider does not expose admin bypasses, none are
+recorded (absence is not evidence of absence). If any of the three
+R8 answers is no, the deployment reports advisory mode and the
+checks adapter refuses to construct — enforcement is never
+claimed, and changing protections or permissions remains the
+repository owner's act, never the software's.
+
+Honest limits:
+
+- The real `github-checks-api` write path (HTTP create/update) is
+  implemented but not exercised against a live provider: no test
+  opens a socket, and this slice claims nothing about live-provider
+  behavior (request shapes, pagination edge cases, provider-side
+  idempotency semantics). The idempotency evidence is against the
+  in-memory fake, which the adapter drives through the same
+  checks-API fn-map contract.
+- CLI wiring (`gate`, `publish-check`, `policy-approve`) is T6;
+  the advisory-mode report shape and the constructor refusal are
+  in place, but no command renders them yet.
+- The adversarial corpus for the named bypass classes against the
+  checks adapter (forged producer claims on published runs,
+  duplicate publication under race, prompt/annotation override
+  attempts at publication) is T7; this slice's tests cover the
+  single-threaded fake path only.
+- Test evidence is bounded synthetic observation, not a formal
+  proof and not a production trust attestation.

@@ -354,3 +354,42 @@
                      :policy/digest (:policy/digest resolution)
                      :policy/approval-event-id nil}
        :gate/trust #{}})))
+
+;; ------------------------------------------------------------------
+;; Admin-bypass reporting (T5, R6)
+
+(defn report-bypassed
+  "Pure: reports a gate as `:bypassed` (distinct from `:allow`) when
+   an administrator bypass is observed. Takes the gate decision and
+   an admin-bypass event carrying `:bypass/actor` and
+   `:bypass/reason` (see `axiom.capability/admin-bypass-event`).
+
+   The returned decision keeps its reasons and gains `:gate/bypass`
+   naming the actor and reason; the outcome is `:bypassed`, never
+   `:allow` — a bypass is observed, never passed. An `:invalid`
+   decision stays `:invalid`: a bypass cannot validate an evaluation
+   that never ran. A bypass event without a non-blank actor and
+   reason is malformed caller input."
+  [decision bypass-event]
+  (when-not (and (map? decision) (keyword? (:gate/decision decision)))
+    (throw (ex-info "report-bypassed requires a gate decision map"
+                    {:axiom/error :invalid})))
+  (let [actor (:bypass/actor bypass-event)
+        reason (:bypass/reason bypass-event)]
+    (when-not (non-blank-string? actor)
+      (throw (ex-info "Admin bypass event is missing its actor"
+                      {:axiom/error :invalid})))
+    (when-not (non-blank-string? reason)
+      (throw (ex-info "Admin bypass event is missing its reason"
+                      {:axiom/error :invalid})))
+    (if (= :invalid (:gate/decision decision))
+      decision
+      (-> decision
+          (assoc :gate/decision :bypassed)
+          (assoc :gate/bypass {:bypass/actor actor :bypass/reason reason})
+          (update :gate/reasons (fnil conj [])
+                  {:gate/id :admin-bypass
+                   :gate/outcome :bypassed
+                   :gate/reason :admin-bypass-observed
+                   :bypass/actor actor
+                   :bypass/reason reason})))))
