@@ -1,7 +1,8 @@
 (ns axiom.ledger
   "Pure durable-ledger port (spec 0002), extended with observation and
    evidence record kinds (spec 0003 R6) and GitHub provider
-   observations (spec 0004 R6). No I/O, no database access:
+   observations (spec 0004 R6), and gate-evaluation decisions plus
+   governance events (spec 0005 T3). No I/O, no database access:
    event envelope construction and validation, hash-chain verification,
    world reduction over stored envelopes, snapshot construction and
    verification, replay reports and decision export bundles. The SQLite
@@ -19,9 +20,10 @@
 (def reducer-version "ledger-reducer-v1")
 (def bundle-version 1)
 ;; Highest ledger schema version this code understands. v1 is the base
-;; schema; v2 adds a covering index; v3 adds the artifacts table (spec 0003)
-;; — see axiom.store migrations.
-(def supported-schema-version 3)
+;; schema; v2 adds a covering index; v3 adds the artifacts table (spec 0003);
+;; v4 adds a (producer, seq) covering index (spec 0005 T3) — see
+;; axiom.store migrations.
+(def supported-schema-version 4)
 
 (def report-limitations
   [:unauthenticated-inputs :test-evidence-is-not-proof :no-execution-authorization
@@ -109,6 +111,254 @@
     (runner/validate-run-record! evidence))
   payload)
 
+;; ---------------------------------------------------------------------------
+;; Gate decisions and governance events (spec 0005 T3)
+;;
+;; New payload kinds through the 0002 append path, additive to the
+;; existing schema: `:decision/gate-evaluation` (a gate decision with
+;; candidate/evaluator/policy identities, named reasons and trust
+;; marks, recorded verbatim — replay never re-derives it from a
+;; different policy) and `:governance` (an authorization event of one
+;; of the `:governance/*` kinds below). The 0002 invariants apply
+;; unchanged: transactional sequence, hash chain, event-id/dedup-key
+;; dedup, forward-only migrations, rebuildable snapshots.
+
+(def gate-decision-record-kind :decision/gate-evaluation)
+(def governance-record-kind :governance)
+
+(def governance-event-kinds
+  "The `:governance/*` event kinds this slice records. Policy
+   approvals and revocations follow the `axiom.policy` event shape;
+   verifier-config approvals, protection changes and admin bypasses
+   are the R2/R6 authorization events."
+  #{:governance/policy-approved :governance/policy-revoked
+    :governance/verifier-config-approved :governance/protection-changed
+    :governance/admin-bypass})
+
+(def ^:private trust-marks
+  #{:trust/local-diagnostic :trust/provider-observed
+    :trust/provider-authenticated :trust/remote-ci})
+
+(def ^:private remote-ci :trust/remote-ci)
+
+(defn- sha40? [x]
+  (and (string? x) (boolean (re-matches #"[0-9a-f]{40}" x))))
+
+(defn- non-negative-int? [x]
+  (and (integer? x) (<= 0 x Long/MAX_VALUE)))
+
+(defn- non-blank-string? [x]
+  (and (string? x) (not (str/blank? x))))
+
+(defn- authorizer-of
+  "The authorizer identity on a governance event: `:governance/authorizer`
+   or `:governance/approver` (the `axiom.policy` approval-event shape),
+   whichever is a non-blank string — or nil. Missing or mismatched role
+   identities are :invalid, never normalized."
+  [event]
+  (some #(when (non-blank-string? (get event %)) (get event %))
+        [:governance/authorizer :governance/approver]))
+
+(defn- governance-shape!
+  "Validates one governance event: every key must be in the allowed
+   set, every required key present, and the authorizer rule applied.
+   Returns the event."
+  [event kind required allowed]
+  (ensure! (map? event) "Governance event must be a map" {})
+  (ensure! (= kind (:event/kind event)) "Governance event kind mismatch"
+           {:expected kind :actual (:event/kind event)})
+  (doseq [k (keys event)]
+    (ensure! (contains? allowed k) "Unknown governance event field"
+             {:kind kind :field k}))
+  (doseq [k required]
+    (ensure! (contains? event k) "Missing required governance event field"
+             {:kind kind :field k}))
+  (when (contains? event :event/id)
+    (ensure! (id? (:event/id event)) "Invalid governance event ID" {}))
+  (when (contains? event :governance/digest)
+    (ensure! (digest? (:governance/digest event)) "Invalid governance digest" {}))
+  (when (some? (:governance/supersedes event))
+    (ensure! (digest? (:governance/supersedes event))
+             "Invalid superseded digest" {}))
+  (doseq [t [:governance/approved-at :governance/revoked-at
+             :governance/changed-at :governance/bypassed-at]]
+    (when (contains? event t)
+      (ensure! (non-negative-int? (get event t)) "Invalid governance timestamp"
+               {:field t})))
+  event)
+
+(defn- validate-governance-event!
+  "Strict per-kind validation of a `:governance/*` event map.
+   Authorization-bearing kinds (policy approval/revocation, verifier
+   config approval, protection change) require an authorizer identity
+   and a content digest; the admin-bypass kind requires the actor and
+   the reason (the design's R6 bypass record). Missing or mismatched
+   role identities are :invalid, never normalized."
+  [event]
+  (ensure! (map? event) "Governance record must carry an event map" {})
+  (let [kind (:event/kind event)]
+    (ensure! (contains? governance-event-kinds kind)
+             "Unknown governance event kind" {:event/kind kind})
+    (case kind
+      :governance/policy-approved
+      (do (governance-shape! event kind
+                             #{:event/kind :governance/policy-id :governance/digest}
+                             #{:event/kind :event/id :governance/policy-id :governance/digest
+                               :governance/supersedes :governance/approver
+                               :governance/authorizer :governance/approved-at})
+          (ensure! (non-blank-string? (:governance/policy-id event))
+                   "Governance policy id must be a non-blank string" {})
+          (ensure! (authorizer-of event)
+                   "Governance event requires an authorizer identity" {:kind kind}))
+
+      :governance/policy-revoked
+      (do (governance-shape! event kind
+                             #{:event/kind :governance/digest}
+                             #{:event/kind :event/id :governance/digest
+                               :governance/approver :governance/authorizer
+                               :governance/revoked-at :governance/reason})
+          (ensure! (authorizer-of event)
+                   "Governance event requires an authorizer identity" {:kind kind}))
+
+      :governance/verifier-config-approved
+      (do (governance-shape! event kind
+                             #{:event/kind :governance/digest}
+                             #{:event/kind :event/id :governance/config-id :governance/digest
+                               :governance/supersedes :governance/approver
+                               :governance/authorizer :governance/approved-at})
+          (when (contains? event :governance/config-id)
+            (ensure! (non-blank-string? (:governance/config-id event))
+                     "Verifier config id must be a non-blank string" {}))
+          (ensure! (authorizer-of event)
+                   "Governance event requires an authorizer identity" {:kind kind}))
+
+      :governance/protection-changed
+      (do (governance-shape! event kind
+                             #{:event/kind :governance/digest}
+                             #{:event/kind :event/id :governance/repo :governance/digest
+                               :governance/approver :governance/authorizer
+                               :governance/changed-at :governance/reason})
+          (when (contains? event :governance/repo)
+            (ensure! (non-blank-string? (:governance/repo event))
+                     "Protection-change repo must be a non-blank string" {}))
+          (ensure! (authorizer-of event)
+                   "Governance event requires an authorizer identity" {:kind kind}))
+
+      :governance/admin-bypass
+      (do (governance-shape! event kind
+                             #{:event/kind :governance/actor :governance/reason}
+                             #{:event/kind :event/id :governance/actor :governance/reason
+                               :governance/authorizer :governance/bypassed-at})
+          (ensure! (non-blank-string? (:governance/actor event))
+                   "Admin bypass requires an actor identity" {})
+          (ensure! (non-blank-string? (:governance/reason event))
+                   "Admin bypass requires a reason" {}))))
+  event)
+
+(defn- validate-governance-record!
+  "Strict validation of a `:governance` payload: the exact record
+   shape plus per-kind event validation. Unknown or malformed
+   governance events are :invalid and can never be written."
+  [payload]
+  (shape! payload #{:record/kind :governance/event} :governance-record)
+  (validate-governance-event! (:governance/event payload))
+  payload)
+
+(def ^:private gate-decisions #{:allow :deny :defer :invalid})
+(def ^:private gate-outcomes
+  #{:satisfied :unknown :stale :failed :forged :violated :defer})
+
+(defn- validate-publication!
+  "The evaluator-bound publication reference (T4 writes it; T3
+   validates it). When present it must name the publishing evaluator;
+   the `:trust/remote-ci` rule in `validate-gate-decision-record!`
+   requires that name to equal the decision's `:gate/evaluator`."
+  [publication context]
+  (when (some? publication)
+    (ensure! (map? publication) "Publication reference must be a map" {:context context})
+    (doseq [k (keys publication)]
+      (ensure! (contains? #{:publication/evaluator :publication/run-id
+                            :publication/published-at} k)
+               "Unknown publication field" {:context context :field k}))
+    (ensure! (non-blank-string? (:publication/evaluator publication))
+             "Publication must name its evaluator" {:context context})
+    (when (contains? publication :publication/published-at)
+      (ensure! (non-negative-int? (:publication/published-at publication))
+               "Invalid publication time" {:context context})))
+  publication)
+
+(defn- validate-gate-decision-record!
+  "Strict validation of a `:decision/gate-evaluation` payload: the
+   exact record shape, the recorded gate decision verbatim (evaluator
+   identity and policy-approval reference required — a run that
+   cannot name its policy approval is :invalid, R2), and the
+   `:trust/remote-ci` issuance rule: a record carrying the mark must
+   carry a valid evaluator-bound publication reference (the
+   publication's evaluator equals the decision's evaluator).
+   Missing/mismatched role identities and forged trust marks are
+   :invalid, never normalized."
+  [payload]
+  (shape! payload #{:record/kind :decision :decision/publication}
+          :gate-decision-record)
+  (let [decision (:decision payload)]
+    (ensure! (map? decision) "Gate decision record must carry a decision map" {})
+    (doseq [k (keys decision)]
+      (ensure! (contains? #{:gate/decision :gate/reasons :gate/candidate
+                            :gate/evaluator :gate/policy :gate/trust
+                            :gate/invalid-reason} k)
+               "Unknown gate decision field" {:field k}))
+    (ensure! (contains? gate-decisions (:gate/decision decision))
+             "Unknown gate decision" {:gate/decision (:gate/decision decision)})
+    (ensure! (non-blank-string? (:gate/evaluator decision))
+             "Gate decision requires an evaluator identity" {})
+    (let [policy (:gate/policy decision)]
+      (ensure! (map? policy) "Gate decision requires a policy header" {})
+      (ensure! (= (set (keys policy))
+                  #{:policy/id :policy/digest :policy/approval-event-id})
+               "Malformed policy header in gate decision" {})
+      (ensure! (non-blank-string? (:policy/id policy))
+               "Gate decision requires a policy id" {})
+      (ensure! (digest? (:policy/digest policy))
+               "Gate decision requires a policy digest" {})
+      (ensure! (non-blank-string? (:policy/approval-event-id policy))
+               "Gate decision requires a policy-approval reference" {}))
+    (let [candidate (:gate/candidate decision)]
+      (ensure! (map? candidate) "Gate decision requires a candidate identity" {})
+      (ensure! (= (set (keys candidate))
+                  #{:candidate/repo :candidate/pr :candidate/base
+                    :candidate/head :candidate/tree})
+               "Malformed candidate identity in gate decision" {})
+      (ensure! (non-blank-string? (:candidate/repo candidate))
+               "Malformed candidate identity in gate decision" {})
+      (ensure! (and (integer? (:candidate/pr candidate))
+                    (pos? (:candidate/pr candidate)))
+               "Malformed candidate identity in gate decision" {})
+      (doseq [sha [:candidate/base :candidate/head :candidate/tree]]
+        (ensure! (sha40? (get candidate sha))
+                 "Malformed candidate identity in gate decision" {:field sha})))
+    (let [reasons (:gate/reasons decision)]
+      (ensure! (vector? reasons) "Gate decision reasons must be a vector" {})
+      (doseq [reason reasons]
+        (ensure! (map? reason) "Gate reason must be a map" {})
+        (ensure! (keyword? (:gate/id reason)) "Gate reason needs an id" {})
+        (ensure! (contains? gate-outcomes (:gate/outcome reason))
+                 "Unknown gate outcome" {:gate/outcome (:gate/outcome reason)})
+        (ensure! (keyword? (:gate/reason reason)) "Gate reason needs a named reason" {})))
+    (let [trust (:gate/trust decision)]
+      (ensure! (set? trust) "Gate trust marks must be a set" {})
+      (doseq [mark trust]
+        (ensure! (contains? trust-marks mark) "Unknown trust mark" {:mark mark}))
+      (let [publication (validate-publication! (:decision/publication payload)
+                                               :gate-decision-record)]
+        (when (contains? trust remote-ci)
+          (ensure! (map? publication)
+                   ":trust/remote-ci requires an evaluator-bound publication reference" {})
+          (ensure! (= (:gate/evaluator decision) (:publication/evaluator publication))
+                   ":trust/remote-ci publication evaluator must match the decision evaluator"
+                   {:decision/evaluator (:gate/evaluator decision)
+                    :publication/evaluator (:publication/evaluator publication)})))))
+  payload)
+
 (defn validate-envelope!
   "Strict validation of a caller-supplied envelope (pre-store, no :seq).
    Unknown or malformed required inputs are rejected and therefore never
@@ -138,6 +388,8 @@
                  (ensure! (map? (:event payload)) "Event record must carry an event" {}))
       :observation (validate-observation-record! payload)
       :evidence-record (validate-evidence-record! payload)
+      :decision/gate-evaluation (validate-gate-decision-record! payload)
+      :governance (validate-governance-record! payload)
       (model/invalid! "Unknown record kind" {:record/kind (:record/kind payload)})))
   envelope)
 
@@ -234,6 +486,49 @@
                         :payload {:record/kind :evidence-record :evidence evidence})]
     (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope))))))
 
+(defn record-governance
+  "Pure construction of the envelope to store for a governance
+   authorization event (`:governance/policy-approved`,
+   `:governance/policy-revoked`, `:governance/verifier-config-approved`,
+   `:governance/protection-changed` or `:governance/admin-bypass`).
+   The event is validated strictly per kind: authorization-bearing
+   kinds require an authorizer identity and a content digest; the
+   admin-bypass kind requires the actor and the reason. Missing or
+   mismatched role identities are :invalid and can never be written.
+   The envelope's :candidate/id is the content digest of the event
+   (`axiom.model/candidate-id`): Axiom never invents an identity.
+   Returns the envelope without :seq; the store assigns the sequence
+   transactionally."
+  [prev-envelope {:keys [governance-event] :as inputs}]
+  (ensure! (map? governance-event) "record-governance requires a governance event map" {})
+  (validate-governance-event! governance-event)
+  (let [envelope (assoc (base-envelope prev-envelope inputs)
+                        :candidate/id (model/candidate-id governance-event)
+                        :payload {:record/kind :governance
+                                  :governance/event governance-event})]
+    (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope))))))
+
+(defn record-gate-decision
+  "Pure construction of the envelope to store for a gate evaluation
+   decision (the verbatim `axiom.gate/evaluate` output map). The
+   decision is validated strictly: an evaluator identity and a
+   policy-approval reference are required, and a decision carrying
+   `:trust/remote-ci` must carry a valid evaluator-bound publication
+   reference (inputs `:publication`, nil when unpublished) whose
+   evaluator equals the decision's evaluator. Forged trust marks are
+   :invalid and can never be written. Replay reproduces the recorded
+   decision verbatim, with its policy digest — never re-derived from
+   a different policy. Returns the envelope without :seq; the store
+   assigns the sequence transactionally."
+  [prev-envelope {:keys [decision publication] :as inputs}]
+  (ensure! (map? decision) "record-gate-decision requires a decision map" {})
+  (let [envelope (assoc (base-envelope prev-envelope inputs)
+                        :candidate/id (model/candidate-id decision)
+                        :payload {:record/kind :decision/gate-evaluation
+                                  :decision decision
+                                  :decision/publication publication})]
+    (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope))))))
+
 (defn stored-envelope!
   "Validation of an envelope read back from storage. Stored corruption is
    an operational failure, never an input problem."
@@ -259,7 +554,7 @@
   (case (get-in envelope [:payload :record/kind])
     :scenario (vec (get-in envelope [:payload :scenario :events]))
     :event [(get-in envelope [:payload :event])]
-    (:observation :evidence-record) []
+    (:observation :evidence-record :decision/gate-evaluation :governance) []
     (operational! "Unknown record kind in stored envelope"
                   {:record/kind (get-in envelope [:payload :record/kind])})))
 
@@ -385,6 +680,33 @@
                                   :event/id (:event/id env)
                                   :evidence (get-in env [:payload :evidence])})
                        (filterv #(= :evidence-record (get-in % [:payload :record/kind])) ordered))
+        ;; Gate decisions and governance events are provenance, not
+        ;; world events. Replay reproduces them verbatim — the stored
+        ;; record, byte-identical, with its policy digest — never
+        ;; re-derived from a different policy. Verbatim reproduction
+        ;; is identity of the stored record; its integrity is already
+        ;; established by verify-chain (payload digest + hash chain)
+        ;; above, so :reproduced? is true exactly when the chain
+        ;; verifies.
+        gate-decisions (mapv (fn [env]
+                               {:seq (:seq env)
+                                :event/id (:event/id env)
+                                :policy/digest (get-in env [:payload :decision
+                                                           :gate/policy :policy/digest])
+                                :reproduced? true
+                                :decision (get-in env [:payload :decision])})
+                             (filterv #(= gate-decision-record-kind
+                                          (get-in % [:payload :record/kind]))
+                                      ordered))
+        governance (mapv (fn [env]
+                           {:seq (:seq env)
+                            :event/id (:event/id env)
+                            :event/kind (get-in env [:payload :governance/event :event/kind])
+                            :reproduced? true
+                            :event (get-in env [:payload :governance/event])})
+                         (filterv #(= governance-record-kind
+                                      (get-in % [:payload :record/kind]))
+                                  ordered))
         decisions (mapv (fn [{:keys [seq recorded recomputed] :as entry}]
                           {:seq seq :event/id (:event/id entry)
                            :decision/id (:decision/id recorded)
@@ -403,6 +725,8 @@
      :decisions decisions
      :observations observations
      :evidence evidence
+     :gate-decisions gate-decisions
+     :governance governance
      :snapshot/used (when used (select-keys used [:snapshot/seq :reducer/version :world/digest]))
      :snapshot/ignored? (boolean (and usable (nil? used)))
      :limitations report-limitations}))

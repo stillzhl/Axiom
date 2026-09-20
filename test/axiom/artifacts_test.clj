@@ -102,7 +102,7 @@
   (with-db [path]
     (let [handle (store/open! path {:create true})]
       (try
-        (is (= 3 (:schema/version handle)))
+        (is (= store/supported-schema-version (:schema/version handle)))
         (let [[e0 e1 e2] (append-scenarios! handle 3)
               digest (test-digest "artifact-content")
               recorded (store/record-artifact!
@@ -427,10 +427,9 @@
             before-world (model/digest (ledger/ledger-world envs))
             before-replay (replay-decisions handle)]
         (store/close! handle)
-        (testing "v1 migrates forward through v2 to v3"
+        (testing "v1 migrates forward through v2/v3 to the supported version"
           (let [reopened (store/open! path {:create false :migrate true})]
             (try
-              (is (= 3 (:schema/version reopened)))
               (is (= store/supported-schema-version (:schema/version reopened)))
               (testing "stored event payloads are byte-identical across migration"
                 (is (= before-payloads (raw-event-payloads path)))
@@ -481,10 +480,10 @@
                               (.execute s1 "CREATE INDEX IF NOT EXISTS idx_events_stream_seq ON events(stream_id, seq)"))
                             (with-open [s2 (.prepareStatement conn "UPDATE schema_version SET version=2")]
                               (.executeUpdate s2))))
-        (testing "a v2 ledger migrates forward to v3"
+        (testing "a v2 ledger migrates forward to the supported version"
           (let [reopened (store/open! path {:create false :migrate true})]
             (try
-              (is (= 3 (:schema/version reopened)))
+              (is (= store/supported-schema-version (:schema/version reopened)))
               (testing "stored event payloads are byte-identical across migration"
                 (is (= before-payloads (raw-event-payloads path)))
                 (let [after (store/read-range reopened 0 100)]

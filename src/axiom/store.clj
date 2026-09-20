@@ -1,5 +1,5 @@
 (ns axiom.store
-  "SQLite adapter for the durable ledger (specs 0002, 0003). This is the only
+  "SQLite adapter for the durable ledger (specs 0002, 0003, 0005 T3). This is the only
    namespace that touches the database file. All chain logic, validation
    and reduction live in the pure axiom.ledger port; this namespace only
    maps envelopes, snapshots and artifact rows to tables, runs
@@ -47,7 +47,11 @@
         size_bytes INTEGER NOT NULL,
         retention TEXT NOT NULL,
         location TEXT NOT NULL,
-        recorded_seq INTEGER NOT NULL)"]})
+        recorded_seq INTEGER NOT NULL)"]
+   ;; Spec 0005 T3: covering index for producer-ordered scans (gate
+   ;; decision / governance audit queries). Additive only; never
+   ;; rewrites stored event payloads.
+   4 ["CREATE INDEX IF NOT EXISTS idx_events_producer_seq ON events(producer, seq)"]})
 
 (defn- operational! [message data]
   (ledger/operational! message data))
