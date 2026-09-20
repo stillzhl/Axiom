@@ -360,6 +360,43 @@
       (is (= first-obs second-obs)))))
 
 ;; ------------------------------------------------------------------
+;; Adapter: unsafe symlinks are typed and never followed for content
+;; (R2 — excluded from digestion)
+
+(deftest unsafe-symlink-excluded-from-digestion
+  (testing "an escaping symlink's target content never enters the observation"
+    (let [dir (init-repo!)
+          secret "TOP-SECRET-OUTSIDE-WORKTREE-0003"
+          ;; The secret lives in the repo's parent directory: the link
+          ;; text "../<name>" escapes the worktree root lexically and
+          ;; names a real file with distinctive bytes, so a follower
+          ;; would leak them into the observation.
+          secret-name (str "axiom-git-secret-" (System/nanoTime) ".txt")
+          secret-file (io/file (.getParent dir) secret-name)]
+      (spit secret-file secret)
+      (swap! *tmp-dirs* conj secret-file)
+      (write! dir "a.txt" "x\n")
+      (commit! dir "base")
+      (Files/createSymbolicLink (.toPath (io/file dir "evil"))
+                                (.toPath (io/file (str "../" secret-name)))
+                                (make-array FileAttribute 0))
+      (commit! dir "escaping link")
+      (let [obs (observation dir :base "HEAD~1")
+            entry (first (filter #(= "evil" (:change/new-path %))
+                                 (get-in obs [:value :changes :changes])))]
+        (is (= :complete (:observation/status obs)))
+        ;; Typed, never followed: the entry carries the raw link text
+        ;; and the reason — nothing derived from the target's content.
+        (is (= :unsafe (:path/kind entry)))
+        (is (= (str "../" secret-name) (:path/target entry)))
+        (is (= :escapes-worktree (:path/unsafe-reason entry)))
+        ;; No content identity anywhere in the entry: exactly the
+        ;; change-entry field set, no digest/blob keys.
+        (is (= git/change-entry-fields (set (keys entry))))
+        ;; The outside file's bytes appear nowhere in the observation.
+        (is (not (str/includes? (pr-str obs) secret)))))))
+
+;; ------------------------------------------------------------------
 ;; Moved git-commit helper: behavior unchanged
 
 (deftest current-commit-sha
