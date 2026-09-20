@@ -38,7 +38,7 @@ acceptance gates are recorded. Verification is pending implementation.
 
 ## Implementation acceptance (pending)
 
-- [ ] `./scripts/check` is green on Temurin 17.0.20 / Clojure 1.12.0 with
+- [x] `./scripts/check` is green on Temurin 17.0.20 / Clojure 1.12.0 with
   the 0004 gates: 0004 gates observe a synthetic PR fixture to the end
   of pagination, assert completeness markers and exact SHAs, run
   `check-pr` and assert advisory outcomes with evidence links, seed a
@@ -46,6 +46,11 @@ acceptance gates are recorded. Verification is pending implementation.
   0001/0002/0003 exit contracts are unchanged; `git diff --check` clean.
   Remote CI: green from a clean checkout. No live network access in the
   check gates.
+  (Evidence: local `./scripts/check` 137 tests / 1651 assertions, 0
+  failures; branch CI run 35538755352 (`offline-kernel` workflow)
+  success on the PR head; `grep -rln "java.net.http" test/ scripts/`
+  empty and the `no-test-opens-a-socket` static test green, so no
+  check-time code path can open a socket.)
 - [x] Pagination enumerates every collection to the end with
   completeness markers; a mid-list page failure after bounded retries
   yields `:observation/incomplete` naming the collection and page,
@@ -109,6 +114,9 @@ acceptance gates are recorded. Verification is pending implementation.
   limits. (This slice: branch, test counts, gate output, honest
   limits, and the open `--pr`-required spec-compliance question.)
 
-Spec status: **Accepted** (2026-09-20). No M3 milestone or Axiom v1
-acceptance is claimed from this spec alone; milestone gates belong to
-the design's M3 gate review.
+Spec status: **Verified** (2026-09-20) — all implementation
+acceptance gates above are met, with per-test evidence references; the
+0004 check gates run green locally and in remote CI (run 35538755352,
+`offline-kernel`, success). No M3 milestone or Axiom v1 acceptance is
+claimed from this spec alone; milestone gates belong to the design's
+M3 gate review.

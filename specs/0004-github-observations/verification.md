@@ -306,6 +306,8 @@ Evidence:
   (enforced by the new static test); every 0004 gate sets
   `AXIOM_GITHUB_FIXTURES` and `env -u AXIOM_GITHUB_TOKEN`, so the CLI
   never reaches the real network fetch.
+- Remote CI on the branch (GitHub Actions run 35538755352,
+  `offline-kernel` workflow): success from a clean checkout.
 
 Tasks: T4 is now checked (its consumers — the CLI `check-pr` and the
 ledger replay path — landed in slices 3–4). T7 and T8 are complete.
