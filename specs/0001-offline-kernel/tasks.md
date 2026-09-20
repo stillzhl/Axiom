@@ -1,0 +1,14 @@
+# Tasks and acceptance gates
+
+- [x] T1: Pin runtime and create executable test/check commands and CI.
+- [x] T2: Implement R1 strict bounded parsing and schema validation.
+- [x] T3: Implement R2 canonical candidate identity and R3 event reduction.
+- [x] T4: Implement R4–R5 evidence qualification and Nomos rules.
+- [x] T5: Implement R6 CLI and synthetic scenarios.
+- [ ] T6: Verify R1–R7; record exact commands, results and limitations.
+
+Acceptance commands: `./scripts/check`, `./scripts/clj -m axiom.cli validate
+--input examples/synthetic-project/allow.edn`, and all four scenario evaluations.
+Expected evaluate exits: allow 0, missing 3, stale 3, failed 2.
+CI must run the same checks from a clean checkout. A green test run supplies
+bounded test evidence, not a formal proof or production trust attestation.

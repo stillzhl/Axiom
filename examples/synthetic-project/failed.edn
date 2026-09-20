@@ -1,0 +1,75 @@
+{:schema/version 1,
+ :contract
+ {:schema/version 1,
+  :project/id "synthetic-project",
+  :specs
+  [{:id "S-001",
+    :revision
+    "sha256:89f79c9acc0417f04663d20456bdd41fcfa58585372a31073c4fdfb1e6a974a7",
+    :state :accepted,
+    :approval "synthetic-owner-approval"}],
+  :tasks
+  [{:id "T-001",
+    :spec "S-001",
+    :depends-on #{},
+    :scope #{"test/" "src/"},
+    :obligations #{"O-001"}}],
+  :obligations
+  [{:id "O-001",
+    :kind :test-suite,
+    :suite "synthetic-unit",
+    :profile "jdk17"}]},
+ :policy
+ {:schema/version 1,
+  :accepted-states #{:accepted :verified},
+  :producers #{"synthetic-runner"},
+  :recipe-digest
+  "sha256:5122ca2cc19ad1e61e2c988b1ebf987fab9af381240cc367d817e78286eb6703",
+  :max-age-seconds 300},
+ :candidate
+ {:repository "synthetic-project",
+  :base "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  :head "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  :tested-commit "cccccccccccccccccccccccccccccccccccccccc",
+  :tested-tree "dddddddddddddddddddddddddddddddddddddddd",
+  :contract-digest
+  "sha256:7622bcfb4082118a16940f3a02e7cc951aac84371657110d3e26acc4dcc53cc9",
+  :policy-digest
+  "sha256:2ca5cb3766681d4387db5a5df0dd3f1efcd85d08d86a229102d2342a846ca911",
+  :recipe-digest
+  "sha256:5122ca2cc19ad1e61e2c988b1ebf987fab9af381240cc367d817e78286eb6703"},
+ :events
+ [{:id "ev-001",
+   :type :evidence,
+   :payload
+   {:observed-at 1000,
+    :producer "synthetic-runner",
+    :recipe-digest
+    "sha256:5122ca2cc19ad1e61e2c988b1ebf987fab9af381240cc367d817e78286eb6703",
+    :candidate
+    {:repository "synthetic-project",
+     :base "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     :head "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     :tested-commit "cccccccccccccccccccccccccccccccccccccccc",
+     :tested-tree "dddddddddddddddddddddddddddddddddddddddd",
+     :contract-digest
+     "sha256:7622bcfb4082118a16940f3a02e7cc951aac84371657110d3e26acc4dcc53cc9",
+     :policy-digest
+     "sha256:2ca5cb3766681d4387db5a5df0dd3f1efcd85d08d86a229102d2342a846ca911",
+     :recipe-digest
+     "sha256:5122ca2cc19ad1e61e2c988b1ebf987fab9af381240cc367d817e78286eb6703"},
+    :obligation "O-001",
+    :result :fail,
+    :suite "synthetic-unit",
+    :attempt 1,
+    :profile "jdk17"}}],
+ :task "T-001",
+ :now 1100,
+ :changes
+ {:complete? true,
+  :files
+  [{:kind :modify,
+    :old-path "src/example.clj",
+    :new-path "src/example.clj",
+    :old-mode "100644",
+    :new-mode "100644"}]}}

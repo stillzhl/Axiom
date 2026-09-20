@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+git diff --check
+./scripts/clj -m axiom.test-runner
+./scripts/clj -m axiom.cli validate --input examples/synthetic-project/allow.edn
+for pair in allow:0 missing:3 stale:3 failed:2; do
+  name=${pair%:*}
+  expected=${pair#*:}
+  actual=0
+  ./scripts/clj -m axiom.cli evaluate --input "examples/synthetic-project/$name.edn" >/dev/null || actual=$?
+  if test "$actual" -ne "$expected"; then
+    printf '%s: expected exit %s, got %s\n' "$name" "$expected" "$actual" >&2
+    exit 1
+  fi
+  printf '%s: exit %s (expected)\n' "$name" "$actual"
+done
