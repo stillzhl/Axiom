@@ -1,10 +1,12 @@
 (ns axiom.cli
   (:require [axiom.adapters.git :as git-adapter]
+            [axiom.adapters.runner :as runner-adapter]
             [axiom.contract :as contract]
             [axiom.ledger :as ledger]
             [axiom.model :as model]
             [axiom.nomos :as nomos]
             [axiom.store :as store]
+            [clojure.java.io :as io]
             [clojure.string :as str])
   (:import (java.nio ByteBuffer)
            (java.nio.charset CodingErrorAction StandardCharsets)
@@ -114,6 +116,129 @@
                           :event/count (count envelopes)}})
       (finally (store/close! handle)))))
 
+(defn- usage-observations []
+  "Usage for the 0003 observation commands. Kept separate from
+   `usage` so the 0001/0002 usage text stays byte-identical."
+  {:exit 4 :output {:error :usage
+                    :message (str "axiom observe-git --repo PATH [--base REV]"
+                                  " | axiom digest --path FILE [--media-type TYPE]"
+                                  " | axiom run --command ID [--args k=v ...]")}})
+
+(defn- observe-git!
+  "Thin adapter over `axiom.adapters.git/observe!`: emits the EDN Git
+   observation report. Read-only: never creates or migrates ledger
+   files, never mutates the observed repository."
+  [operands]
+  (let [[f1 v1 f2 v2] operands]
+    (if (and (= "--repo" f1) (string? v1)
+             (or (and (nil? f2) (= 2 (count operands)))
+                 (and (= "--base" f2) (string? v2) (= 4 (count operands)))))
+      (let [observation (git-adapter/observe!
+                         (cond-> {:repo v1} (some? v2) (assoc :base v2)))]
+        ;; A git step failure yields a validated :incomplete observation
+        ;; naming the failing step: still an honest EDN report, but the
+        ;; observation itself failed — exit 5 (R7). A missing repository
+        ;; is :invalid (exit 4); a rejected traversal is :operational
+        ;; (exit 5), via the shared error mapping below.
+        {:exit (if (= :complete (:observation/status observation)) 0 5)
+         :output observation})
+      (usage-observations))))
+
+(defn- digest-file!
+  "Thin digest of an artifact file: SHA-256 over the exact bytes
+   (`axiom.model/sha256-bytes`), validated media type (default
+   application/octet-stream) and byte size. Read-only: never creates
+   or migrates ledger files."
+  [operands]
+  (let [[f1 v1 f2 v2] operands]
+    (if (and (= "--path" f1) (string? v1)
+             (or (and (nil? f2) (= 2 (count operands)))
+                 (and (= "--media-type" f2) (string? v2) (= 4 (count operands)))))
+      (let [media-type (or v2 store/default-media-type)
+            file (io/file ^String v1)]
+        (when-not (store/media-type? media-type)
+          (model/invalid! "Invalid media type" {:media-type media-type}))
+        (when-not (.exists file)
+          (model/invalid! "File does not exist" {:path v1}))
+        (when-not (.isFile file)
+          (model/invalid! "Not a regular file" {:path v1}))
+        (let [bytes (try (Files/readAllBytes (.toPath file))
+                         (catch java.io.IOException e
+                           (throw (ex-info "Cannot read file"
+                                           {:axiom/error :operational :path v1} e))))]
+          {:exit 0
+           :output {:artifact/digest (model/sha256-bytes bytes)
+                    :artifact/media-type media-type
+                    :artifact/size-bytes (alength ^bytes bytes)
+                    :artifact/location v1}}))
+      (usage-observations))))
+
+(defn- parse-arg-kv
+  "Parses one k=v operand on the first '='; nil when malformed (empty
+   key or no '=')."
+  [s]
+  (let [idx (str/index-of ^String s "=")]
+    (when (and (some? idx) (pos? ^long idx))
+      [(subs s 0 idx) (subs s (inc idx))])))
+
+(defn- coerce-slot-value
+  "Coerces one k=v string operand to the slot's declared type. Integer
+   slots parse as longs (unparseable input is :invalid); string and
+   enum slots take the raw string — the pure port validates membership
+   and shape."
+  [command-id slot-name slot-type s]
+  (if (= :integer slot-type)
+    (try (Long/parseLong ^String s)
+         (catch NumberFormatException _
+           (model/invalid! "Integer argument requires an integer value"
+                           {:command/id command-id :slot/name slot-name :value s})))
+    s))
+
+(defn- run-diagnostic!
+  "Thin adapter over `axiom.adapters.runner/run!`: executes the
+   checked-in registry command against its configured working directory
+   and emits the Evidence record (EDN). Honest about execution: it only
+   ever runs within the registry's configured working directory."
+  [operands]
+  (let [[f1 v1 f2 & kvs] operands]
+    (if (and (= "--command" f1) (string? v1) (not (str/blank? v1))
+             (or (and (nil? f2) (= 2 (count operands)))
+                 (and (= "--args" f2) (seq kvs) (every? string? kvs)
+                      (= (+ 3 (count kvs)) (count operands)))))
+      (let [pairs (mapv parse-arg-kv kvs)]
+        (if (or (some nil? pairs)
+                (not= (count pairs) (count (distinct (map first pairs)))))
+          (usage-observations)
+          ;; The CLI owns argument parsing: k=v strings are coerced to
+          ;; the slots' declared types before the adapter validates.
+          (let [registry (runner-adapter/load-registry!)
+                command (get-in registry [:commands v1])]
+            (when-not command
+              (model/invalid! "Unknown command ID" {:command/id v1}))
+            (let [slot-types (into {}
+                                   (map (fn [slot] [(:slot/name slot) (:slot/type slot)]))
+                                   (filter map? (:command/args command)))
+                  args (into {}
+                             (map (fn [[k v]]
+                                    [k (coerce-slot-value v1 k (get slot-types k :string) v)]))
+                             pairs)
+                  record (runner-adapter/run!
+                          {:registry registry
+                           :command/id v1
+                           :args args
+                           ;; The CLI runs a diagnostic with no candidate
+                           ;; under evaluation; candidate SHAs are nil-able.
+                           :candidate {:candidate/base nil :candidate/head nil
+                                       :candidate/tree nil}})]
+              ;; A completed run (pass or fail) is a valid report: exit 0.
+              ;; A timeout, cancellation or output-cap violation yields an
+              ;; honest :incomplete Evidence record naming the bound — the
+              ;; evidence is incomplete, so the run failed operationally:
+              ;; exit 5 (R7).
+              {:exit (if (:run/complete? record) 0 5)
+               :output record}))))
+      (usage-observations))))
+
 (defn run [args]
   (try
     (let [[command & operands] args]
@@ -159,6 +284,15 @@
             (export-bundle! v1 v2 v3)
             (usage)))
 
+        (= "observe-git" command)
+        (observe-git! operands)
+
+        (= "digest" command)
+        (digest-file! operands)
+
+        (= "run" command)
+        (run-diagnostic! operands)
+
         :else (usage)))
     (catch clojure.lang.ExceptionInfo e
       {:exit (if (= :invalid (:axiom/error (ex-data e))) 4 5)
@@ -169,6 +303,11 @@
 
 (defn -main [& args]
   (let [{:keys [exit output]} (run args)]
-    (prn output)
+    ;; The CLI emits EDN in Axiom's strict sense (readable by
+    ;; `contract/read-data`): namespace-map printing (`#:ns{...}`) is
+    ;; disabled. This is byte-identical for the 0001/0002 reports,
+    ;; which never contain namespace-map forms.
+    (binding [*print-namespace-maps* false]
+      (prn output))
     (shutdown-agents)
     (System/exit exit)))

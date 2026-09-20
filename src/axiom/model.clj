@@ -32,10 +32,15 @@
 
 (defn edn-str
   "Readable EDN text for a restricted-vocabulary value. Round-trips through
-   the strict reader to an equal value; used for durable storage."
+   the strict reader to an equal value; used for durable storage.
+   Namespace-map printing (`#:ns{...}`) is disabled: the strict reader
+   rejects `#` dispatch forms, so the durable text must never contain
+   them (uniformly-namespaced maps, e.g. an observation's :producer,
+   would otherwise fail to round-trip)."
   [x]
   (binding [*print-length* nil *print-level* nil *print-meta* false
-            *print-readably* true *print-dup* false]
+            *print-readably* true *print-dup* false
+            *print-namespace-maps* false]
     (pr-str x)))
 
 (defn- hex-bytes [^bytes bs]
