@@ -12,7 +12,7 @@
   `src/axiom/github.clj` + `test/axiom/github_test.clj`, synthetic
   fixtures only; `./scripts/check` 92 tests / 1427 assertions, 0
   failures.)
-- [ ] T2: Implement `axiom.adapters.github`: the only namespace touching
+- [x] T2: Implement `axiom.adapters.github`: the only namespace touching
   the network, via `java.net.http.HttpClient` with declared timeouts,
   user agent and API version header. GET requests only — no code path
   for POST/PUT/PATCH/DELETE. Pagination to the end of every
@@ -22,12 +22,50 @@
   (repository, resource, ETag), invalidated on base/head change (stale
   reuse is an operational failure). The fetch function is injectable so
   tests run against synthetic fixtures with no network.
-- [ ] T3: Implement producer and workflow identity validation: token
+  (Landed 2026-09-20 in Slice 2, branch `feat/0004-github-adapter`:
+  `src/axiom/adapters/github.clj` — single GET request constructor,
+  JDK HttpClient, no new production dependencies; Link pagination with
+  per-collection completeness markers; mid-list page failure after
+  bounded retries yields `:observation/incomplete` naming collection,
+  page and retry bound, never a partial list; 429/5xx bounded retries
+  honoring `Retry-After` and `X-RateLimit-Reset`; 401/403/404 terminal
+  operational naming status and resource; strict per-field payload
+  validation (unknown file statuses/PR states/review states are
+  operational, offending field named; unknown check conclusions map to
+  `:unknown`); bounded ETag cache keyed by [owner repo resource url]
+  with base/head scoping — a 304 for a stale entry is operational;
+  provenance records distinct requested URLs, per-URL ETags,
+  rate-limit state and the declared client config.
+  `test/axiom/adapters_github_test.clj` — 30 tests, synthetic fixtures
+  only (invented `synth-org/synth-repo`, 40-hex SHAs, `synth-*` logins),
+  zero network; `./scripts/check` 122 tests / 1527 assertions, 0
+  failures.)
+- [x] T3: Implement producer and workflow identity validation: token
   identity resolution (from `AXIOM_GITHUB_TOKEN` or `--token-file`;
   raw tokens never accepted as CLI arguments), authenticated vs
   anonymous trust marks, forged-producer rejection (`:invalid`),
   workflow/run identity consistency checks (name, path, event, actor,
   run ID, attempt) with inconsistencies as named operational failures.
+  (Landed 2026-09-20 in Slice 2, same branch: credential resolved
+  out-of-band only — env map defaulting to the real environment, or a
+  token file that must be readable; a raw `:token` argument is
+  rejected as `:invalid`; token identity resolved once per observation
+  via the provider `/user` endpoint (URL derived from the configured
+  API base); authenticated observations marked
+  `:trust/provider-authenticated`, anonymous ones
+  `:trust/provider-observed`; producer claims contradicting the
+  resolved identity fail validation as `:invalid` (forged producer);
+  workflow/run/job identity checks — unique run IDs, unique ascending
+  attempt numbers, job/run association, run conclusion agreeing with
+  the latest attempt, job conclusion agreeing with the selected
+  attempt — with inconsistencies as named operational failures. A
+  passing job inside a failing run is accepted (job conclusions are
+  not required to equal the run aggregate). Honest limits: the
+  task text's `--token-file` CLI flag belongs to T5 — the CLI does
+  not exist yet, so the adapter accepts `:token-file` as an option
+  and rejects raw token arguments; workflow name/path/event/actor
+  have no second authoritative source, so their "consistency" is
+  shape validation plus the run/job/attempt cross-checks above.)
 - [ ] T4: Implement `axiom.github/check-pr` (pure): advisory evaluation
   over validated observations into per-gate outcomes bound to exact
   base/head SHAs with exact evidence links; `can-merge` as the

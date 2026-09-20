@@ -75,6 +75,89 @@ behavior its text describes is implemented and tested above, but its
 consumers (CLI in T5, ledger wiring in T6) do not exist yet, so no
 broader completion is claimed from this slice.
 
+## Slice 2 implementation evidence — 2026-09-20
+
+Branch `feat/0004-github-adapter`: T2 network adapter plus T3
+identity plumbing. Synthetic fixtures only; no network, no live
+credentials, no real repository identities (invented
+`synth-org/synth-repo`, synthetic 40-hex SHAs, `synth-*` logins,
+`synth-token-*` credentials); nothing HomeKV-specific.
+
+New files:
+
+- `src/axiom/adapters/github.clj` — the ONLY namespace touching the
+  network. JDK `java.net.http.HttpClient`; no new production
+  dependencies. Exactly one request constructor (`build-get-request`,
+  a single `(.GET)` call site — grep-verified, no `.POST`/`.PUT`/
+  `.PATCH`/`.DELETE` construction anywhere). Declared client config
+  (API base/version, user agent, connect/request timeouts, bounded
+  retries and backoff, bounded ETag cache) recorded in observation
+  provenance. Minimal internal JSON reader (used only by the real
+  network fetch). Link `rel="next"` pagination to the end of every
+  collection (changes, runs, reviews, artifacts, plus nested run/job
+  attempts); a page failing after bounded retries yields
+  `:observation/incomplete` naming the collection, page and retry
+  bound — incomplete collections never carry partial items, and a
+  nested jobs failure keeps the failing run with its job list marked
+  incomplete. 429 and transient 5xx retried with backoff honoring
+  `Retry-After` and `X-RateLimit-Reset`; 401/403/404 (and any other
+  unexpected status) are terminal operational failures naming status
+  and resource. Strict per-field provider payload validation —
+  violations are operational failures naming the offending field;
+  unknown check conclusions map to `:unknown`, never success. Bounded
+  ETag cache keyed by [owner repo resource url] storing ETag, body
+  and the base/head SHAs recorded under; stale entries are
+  invalidated and a 304 for a stale entry is an operational failure.
+  Identity: credential resolved out-of-band only (env map defaulting
+  to the real environment, or a readable token file — a raw `:token`
+  argument is `:invalid`); token identity resolved once per
+  observation via the provider `/user` endpoint; authenticated
+  observations marked `:trust/provider-authenticated`, anonymous ones
+  `:trust/provider-observed`; every produced observation is validated
+  with `axiom.github/validate-observation!` before return. Fetch is
+  injectable (`:fetch-fn` / `fixture-fetch`).
+- `test/axiom/adapters_github_test.clj` — 30 tests / 100 assertions:
+  multi-page pagination to completion; mid-list page failure naming
+  collection/page/bound (`:observation/incomplete`, no partial items);
+  nested jobs page failure naming the run; 429 honoring `Retry-After`
+  then succeeding; 429 honoring `X-RateLimit-Reset`; retry exhaustion
+  naming the bound; 401/403/404 terminal without retries; malformed
+  payloads (unknown file status, missing PR title, malformed run SHA,
+  PR number mismatch) naming the field; stale ETag cache hit
+  operational after base movement; 304 reuse under unchanged SHAs;
+  anonymous vs token-file/env authenticated trust; token identity
+  resolved exactly once per observation; 401 on the identity endpoint
+  operational without leaking the token; forged-producer tampering
+  (`:invalid`); duplicate run IDs, run/job conclusion mismatches,
+  job/run association mismatch as named operational failures; unknown
+  conclusions mapping to `:unknown`; passing job inside a failing run
+  accepted; fixture fetch with no fixture operational; GET-only
+  grep assertion; JSON reader cases.
+
+Edited:
+
+- `test/axiom/test_runner.clj` — runs `axiom.adapters-github-test`.
+
+Evidence:
+
+- `git diff --check` — clean.
+- `./scripts/check` (Temurin 17.0.20, Clojure 1.12.0): **122 tests,
+  1527 assertions, 0 failures, 0 errors** — up from the Slice 1
+  baseline (92 tests, 1427 assertions). All 0001/0002/0003 CLI gates
+  unchanged and passing (evaluate allow 0 / missing 3 / stale 3 /
+  failed 2; status/next/explain exit 0; replay/export-bundle 0/4/5;
+  ledger tamper gate exit 5; observe-git/digest/run 0/4/5).
+- Adapter source grep: `\(.GET\)` occurs exactly once (the request
+  constructor); no `.POST`/`.PUT`/`.PATCH`/`.DELETE` occurrences —
+  GET-only by construction.
+
+Tasks: T2 and T3 are complete. T4's checkbox stays as decided in
+Slice 1 (pure behavior implemented in the port, consumers pending in
+T5/T6). The `--token-file` CLI flag surface belongs to T5; the
+adapter-level credential contract (env/token-file options, raw token
+rejection) is done here. No milestone Verified claim is made from
+this slice.
+
 ## Limits and deferred work
 
 - Test evidence is bounded (synthetic fixtures), not a formal proof or
@@ -88,7 +171,7 @@ broader completion is claimed from this slice.
   of scope here.
 - Self-hosting is planned with independent evaluator/policy promotion
   gates; Axiom did not drive this spec run.
-- The network adapter (`axiom.adapters.github`, T2), token/producer
-  identity plumbing (T3), CLI (T5), ledger wiring (T6), adversarial
-  fixture tests (T7), and 0004 `scripts/check` gates (T8) are not part
-  of this slice.
+- The network adapter (`axiom.adapters.github`, T2) and token/producer
+  identity plumbing (T3) landed in Slice 2 above. CLI (T5), ledger
+  wiring (T6), adversarial fixture tests (T7), and 0004
+  `scripts/check` gates (T8) remain.
