@@ -1,3 +1,10 @@
-clojure 1.12.0 c45333006441a059ea9fdb1341fc6c1f40b921a10dccd82665311e48a0384763
-spec.alpha 0.5.238 94cd99b6ea639641f37af4860a643b6ed399ee5a8be5d717cff0b663c8d75077
-core.specs.alpha 0.4.74 eb73ac08cf49ba840c88ba67beef11336ca554333d9408808d78946e0feb9ddb
+# Pinned dependencies: "<group-path> <artifact> <version> <sha256-of-jar>".
+# Jars are fetched from https://repo.maven.apache.org/maven2/<group-path>/<artifact>/<version>/
+# and verified against the recorded SHA-256 before use.
+org/clojure clojure 1.12.0 c45333006441a059ea9fdb1341fc6c1f40b921a10dccd82665311e48a0384763
+org/clojure spec.alpha 0.5.238 94cd99b6ea639641f37af4860a643b6ed399ee5a8be5d717cff0b663c8d75077
+org/clojure core.specs.alpha 0.4.74 eb73ac08cf49ba840c88ba67beef11336ca554333d9408808d78946e0feb9ddb
+# SQLite JDBC driver for the axiom.store durable-ledger adapter (spec 0002).
+# The driver runs without slf4j on the classpath (verified 2026-09-20); no
+# transitive dependency is pinned.
+org/xerial sqlite-jdbc 3.49.0.0 1df1b9404b1e434f7215b45e88d3a10558ccf5e905dcd36aff9d7f2c85bc225a

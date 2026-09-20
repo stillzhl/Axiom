@@ -30,6 +30,14 @@
             *print-readably* true *print-dup* false]
     (pr-str [:axiom/canonical-v1 (encoded x)])))
 
+(defn edn-str
+  "Readable EDN text for a restricted-vocabulary value. Round-trips through
+   the strict reader to an equal value; used for durable storage."
+  [x]
+  (binding [*print-length* nil *print-level* nil *print-meta* false
+            *print-readably* true *print-dup* false]
+    (pr-str x)))
+
 (defn digest [x]
   (str "sha256:"
        (apply str (map #(format "%02x" (bit-and 0xff %))
