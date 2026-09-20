@@ -1,5 +1,6 @@
 (ns axiom.cli
-  (:require [axiom.contract :as contract]
+  (:require [axiom.adapters.git :as git-adapter]
+            [axiom.contract :as contract]
             [axiom.ledger :as ledger]
             [axiom.model :as model]
             [axiom.nomos :as nomos]
@@ -7,8 +8,7 @@
             [clojure.string :as str])
   (:import (java.nio ByteBuffer)
            (java.nio.charset CodingErrorAction StandardCharsets)
-           (java.nio.file Files Paths)
-           (java.util.concurrent TimeUnit)))
+           (java.nio.file Files Paths)))
 
 (defn- read-input [path]
   (with-open [stream (Files/newInputStream (Paths/get path (make-array String 0))
@@ -59,19 +59,6 @@
   [path]
   (store/open! path {:create false :migrate false}))
 
-(defn- git-commit
-  "Best-effort engine commit identity for export bundles; informational
-   only, never load-bearing."
-  []
-  (try
-    (let [proc (-> (ProcessBuilder. ^java.util.List ["git" "rev-parse" "HEAD"])
-                   (.redirectErrorStream true)
-                   (.start))
-          finished (.waitFor proc 5 TimeUnit/SECONDS)
-          out (str/trim (slurp (.getInputStream proc)))]
-      (if (and finished (re-matches #"[0-9a-f]{40}" out)) out "unknown"))
-    (catch Exception _ "unknown")))
-
 (defn- replay-ledger! [path through-s]
   (let [handle (open-ledger! path)]
     (try
@@ -112,7 +99,7 @@
             snapshot (store/latest-snapshot handle)
             usable (when (and snapshot (<= (:snapshot/seq snapshot) through)) snapshot)
             engine {:axiom/version model/engine-version
-                    :axiom/commit (git-commit)
+                    :axiom/commit (git-adapter/current-commit-sha)
                     :clojure/version (clojure-version)
                     :reducer/version ledger/reducer-version}
             bundle (ledger/export-bundle-data
