@@ -32,7 +32,7 @@
   invariant. Acceptance: replay of a prefix reproduces recorded gate
   decisions verbatim with their policy digests; forged trust marks are
   `:invalid` at validation.
-- [ ] T4: Implement `axiom.adapters.checks`: the only
+- [x] T4: Implement `axiom.adapters.checks`: the only
   provider-mutating namespace, behind the `axiom.gate` port, using
   `java.net.http.HttpClient`. Constructor requires a passing R8
   capability record; a single write operation (check-run create/update
@@ -43,7 +43,7 @@
   Acceptance: publication binds candidate/evaluator/policy identities
   in the run output; republishing is idempotent; without a passing
   capability record the adapter refuses to construct.
-- [ ] T5: Capability check, advisory mode, and protection
+- [x] T5: Capability check, advisory mode, and protection
   observation: deployment capability record from the three R8
   answers; advisory-mode reporting when enforcement cannot be
   configured (evaluation produced and recorded, enforcement never
