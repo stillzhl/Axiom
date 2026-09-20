@@ -40,7 +40,15 @@ bundle_file=$(mktemp /tmp/axiom-bundle-XXXXXX.edn)
 tampered_bundle=$(mktemp /tmp/axiom-bundle-tampered-XXXXXX.edn)
 replay_out=$(mktemp /tmp/axiom-replay-XXXXXX.edn)
 ledger_tmp=$(mktemp -d)
-trap 'rm -rf "$ledger_db" "$ledger_db-wal" "$ledger_db-shm" "$bundle_file" "$tampered_bundle" "$replay_out" "$ledger_tmp"' EXIT
+git_repo=$(mktemp -d)
+artifact_file=$(mktemp /tmp/axiom-artifact-XXXXXX.bin)
+obs_ledger=$(mktemp /tmp/axiom-obs-ledger-XXXXXX.db)
+obs_seed_log=$(mktemp /tmp/axiom-obs-seed-XXXXXX.log)
+obs_replay_out=$(mktemp /tmp/axiom-obs-replay-XXXXXX.edn)
+obs_a=$(mktemp /tmp/axiom-obs-a-XXXXXX.edn)
+obs_b=$(mktemp /tmp/axiom-obs-b-XXXXXX.edn)
+plain_dir=$(mktemp -d)
+trap 'rm -rf "$ledger_db" "$ledger_db-wal" "$ledger_db-shm" "$bundle_file" "$tampered_bundle" "$replay_out" "$ledger_tmp" "$git_repo" "$artifact_file" "$obs_ledger" "$obs_ledger-wal" "$obs_ledger-shm" "$obs_seed_log" "$obs_replay_out" "$obs_a" "$obs_b" "$plain_dir"' EXIT
 LEDGER_DB="$ledger_db" ./scripts/clj -e '
 (require (quote [axiom.store :as store]) (quote [axiom.ledger :as ledger]) (quote [axiom.contract :as contract]))
 (defn load-scenario [name]
@@ -96,3 +104,147 @@ sed 's/:bundle\/digest "sha256:[0-9a-f]*/:bundle\/digest "sha256:000000000000000
 actual=0; ./scripts/clj -m axiom.cli replay --bundle "$tampered_bundle" >/dev/null 2>&1 || actual=$?
 test "$actual" -eq 5 || { printf 'tampered bundle: expected exit 5, got %s\n' "$actual" >&2; exit 1; }
 printf 'ledger exits: 4 on invalid input, 5 on operational failure (expected)\n'
+
+# Spec 0003 gates: observe a synthetic git repo (branch, dirty change,
+# symlink), digest a synthetic file, run bounded synthetic probes,
+# record observation/evidence events in a ledger and replay them.
+printf 'building synthetic git repo for the 0003 gates\n'
+git -C "$git_repo" init -q -b main
+git -C "$git_repo" config user.email "axiom-check@example.com"
+git -C "$git_repo" config user.name "axiom-check"
+git -C "$git_repo" config commit.gpgsign false
+printf 'base content\n' > "$git_repo/a.txt"
+git -C "$git_repo" add -A
+git -C "$git_repo" commit -qm "base"
+git -C "$git_repo" checkout -qb feature
+printf 'feature content\n' > "$git_repo/b.txt"
+ln -s a.txt "$git_repo/link"
+git -C "$git_repo" add -A
+git -C "$git_repo" commit -qm "feature"
+printf 'dirty change\n' >> "$git_repo/a.txt"
+printf 'untracked\n' > "$git_repo/c.txt"
+obs_base=$(git -C "$git_repo" rev-parse HEAD~1)
+obs_head=$(git -C "$git_repo" rev-parse HEAD)
+obs_tree=$(git -C "$git_repo" rev-parse 'HEAD^{tree}')
+
+./scripts/clj -m axiom.cli observe-git --repo "$git_repo" --base "$obs_base" > "$obs_a"
+printf 'observe-git: exit 0 (expected)\n'
+./scripts/clj -m axiom.cli observe-git --repo "$git_repo" --base "$obs_base" > "$obs_b"
+sha_of() { grep -o ":git/$1 \"[0-9a-f]*\"" "$2" | head -1 | cut -d'"' -f2; }
+for field in base head tree; do
+  sha_a=$(sha_of "$field" "$obs_a"); sha_b=$(sha_of "$field" "$obs_b")
+  test "$sha_a" = "$sha_b" \
+    || { printf 'observe-git: %s differs across runs\n' "$field" >&2; exit 1; }
+done
+test "$(sha_of base "$obs_a")" = "$obs_base" \
+  || { printf 'observe-git: base SHA mismatch\n' >&2; exit 1; }
+test "$(sha_of head "$obs_a")" = "$obs_head" \
+  || { printf 'observe-git: head SHA mismatch\n' >&2; exit 1; }
+test "$(sha_of tree "$obs_a")" = "$obs_tree" \
+  || { printf 'observe-git: tree SHA mismatch\n' >&2; exit 1; }
+printf 'observe-git: identical base/head/tree SHAs on repeat runs (expected)\n'
+grep -q '"a.txt"' "$obs_a" || { printf 'observe-git: expected dirty a.txt\n' >&2; exit 1; }
+grep -q '"c.txt"' "$obs_a" || { printf 'observe-git: expected dirty c.txt\n' >&2; exit 1; }
+grep -q 'dirty-tree' "$obs_a" \
+  && { printf 'observe-git: unexpected synthetic dirty-tree SHA\n' >&2; exit 1; }
+grep -q ':path/kind :symlink' "$obs_a" \
+  || { printf 'observe-git: expected typed symlink entry\n' >&2; exit 1; }
+printf 'observe-git: dirty file list, no synthetic tree SHA, symlink typed (expected)\n'
+
+printf 'synthetic artifact bytes\nsecond line\n' > "$artifact_file"
+./scripts/clj -m axiom.cli digest --path "$artifact_file" > "$obs_replay_out"
+printf 'digest: exit 0 (expected)\n'
+expected_digest="sha256:$(sha256sum "$artifact_file" | cut -d' ' -f1)"
+grep -Fq ":artifact/digest \"$expected_digest\"" "$obs_replay_out" \
+  || { printf 'digest: mismatch with sha256sum\n' >&2; exit 1; }
+expected_size=$(wc -c < "$artifact_file")
+grep -Fq ":artifact/size-bytes $expected_size" "$obs_replay_out" \
+  || { printf 'digest: size mismatch\n' >&2; exit 1; }
+printf 'digest: matches sha256sum on the same bytes (expected)\n'
+
+./scripts/clj -m axiom.cli run --command true-probe > "$obs_replay_out"
+printf 'run true-probe: exit 0 (expected)\n'
+grep -q ':trust/local-diagnostic' "$obs_replay_out" \
+  || { printf 'run: expected :trust/local-diagnostic\n' >&2; exit 1; }
+grep -q ':run/result :pass' "$obs_replay_out" \
+  || { printf 'run: expected :run/result :pass\n' >&2; exit 1; }
+printf 'run: evidence marked :trust/local-diagnostic (expected)\n'
+actual=0
+./scripts/clj -m axiom.cli run --command sleep-probe --args seconds=30 > "$obs_replay_out" 2>&1 || actual=$?
+test "$actual" -eq 5 \
+  || { printf 'run sleep-probe: expected exit 5, got %s\n' "$actual" >&2; exit 1; }
+grep -q ':run/outcome :timed-out' "$obs_replay_out" \
+  || { printf 'run sleep-probe: expected :timed-out record\n' >&2; exit 1; }
+printf 'run sleep-probe (5s registry timeout): exit 5 with :timed-out (expected)\n'
+
+# Record one observation and one evidence event through the 0002 append
+# path, then replay and assert the recorded digests and trust marks.
+OBS_DB="$obs_ledger" OBS_REPO="$git_repo" OBS_BASE="$obs_base" ./scripts/clj -e '
+(require (quote [axiom.store :as store]) (quote [axiom.ledger :as ledger])
+         (quote [axiom.contract :as contract])
+         (quote [axiom.adapters.git :as git-adapter])
+         (quote [axiom.adapters.runner :as runner-adapter]))
+(let [db (System/getenv "OBS_DB")
+      repo (System/getenv "OBS_REPO")
+      base (System/getenv "OBS_BASE")
+      handle (store/open! db {:create true})
+      scenario (contract/read-data (slurp "examples/synthetic-project/allow.edn"))
+      s1 (store/append! handle
+            (ledger/record-scenario nil
+              {:event/id "evt-0003-s1" :stream/id "synthetic-0003"
+               :dedup/key "submit-0003-s1" :producer "synthetic-check"
+               :observed/time 1000 :ingested/time 1005
+               :scenario scenario}))
+      observation (git-adapter/observe! {:repo repo :base base})
+      o1 (store/append! handle
+            (ledger/record-observation s1
+              {:event/id "evt-0003-o1" :stream/id "synthetic-0003"
+               :dedup/key "submit-0003-o1" :producer "synthetic-check"
+               :observed/time 2000 :ingested/time 2005
+               :observation observation}))
+      evidence (runner-adapter/run!
+                 {:registry nil :command/id "true-probe" :args {}
+                  :candidate {:candidate/base nil :candidate/head nil
+                              :candidate/tree nil}
+                  :run/id "check-run-1"})
+      _ (store/append! handle
+            (ledger/record-evidence o1
+              {:event/id "evt-0003-e1" :stream/id "synthetic-0003"
+               :dedup/key "submit-0003-e1" :producer "synthetic-check"
+               :observed/time 3000 :ingested/time 3005
+               :evidence evidence}))]
+  (store/close! handle)
+  (println "SEED-OBS-HEAD" (get-in observation [:subject :git/head]))
+  (println "SEED-EV-DIGEST" (:run/stdout-digest evidence))
+  (println "ledger seeded"))' > "$obs_seed_log"
+printf 'observation/evidence ledger seeded\n'
+./scripts/clj -m axiom.cli replay --ledger "$obs_ledger" > "$obs_replay_out"
+printf 'replay --ledger (0003): exit 0 (expected)\n'
+grep -q ':observation/kind :git-observation' "$obs_replay_out" \
+  || { printf 'replay: expected :git-observation entry\n' >&2; exit 1; }
+grep -q ':run/kind :diagnostic-run' "$obs_replay_out" \
+  || { printf 'replay: expected :diagnostic-run entry\n' >&2; exit 1; }
+grep -q ':trust/local-diagnostic' "$obs_replay_out" \
+  || { printf 'replay: expected :trust/local-diagnostic marks\n' >&2; exit 1; }
+seed_head=$(grep -o 'SEED-OBS-HEAD [0-9a-f]*' "$obs_seed_log" | cut -d' ' -f2)
+seed_digest=$(grep -o 'SEED-EV-DIGEST sha256:[0-9a-f]*' "$obs_seed_log" | cut -d' ' -f2)
+grep -Fq "$seed_head" "$obs_replay_out" \
+  || { printf 'replay: recorded observation head SHA missing\n' >&2; exit 1; }
+grep -Fq "$seed_digest" "$obs_replay_out" \
+  || { printf 'replay: recorded evidence stdout digest missing\n' >&2; exit 1; }
+printf 'replay: observation and evidence recorded with digests and trust marks (expected)\n'
+
+# 0003 exit contracts: invalid input -> 4, operational failure -> 5.
+actual=0; ./scripts/clj -m axiom.cli observe-git --repo /tmp/axiom-no-such-0003 >/dev/null 2>&1 || actual=$?
+test "$actual" -eq 4 \
+  || { printf 'observe-git missing repo: expected exit 4, got %s\n' "$actual" >&2; exit 1; }
+actual=0; ./scripts/clj -m axiom.cli digest --path /tmp/axiom-no-such-0003 >/dev/null 2>&1 || actual=$?
+test "$actual" -eq 4 \
+  || { printf 'digest missing file: expected exit 4, got %s\n' "$actual" >&2; exit 1; }
+actual=0; ./scripts/clj -m axiom.cli run --command bogus-probe >/dev/null 2>&1 || actual=$?
+test "$actual" -eq 4 \
+  || { printf 'run bogus command: expected exit 4, got %s\n' "$actual" >&2; exit 1; }
+actual=0; ./scripts/clj -m axiom.cli observe-git --repo "$plain_dir" >/dev/null 2>&1 || actual=$?
+test "$actual" -eq 5 \
+  || { printf 'observe-git non-repo dir: expected exit 5, got %s\n' "$actual" >&2; exit 1; }
+printf '0003 exits: 4 on invalid input, 5 on operational failure (expected)\n'

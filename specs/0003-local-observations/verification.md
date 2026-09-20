@@ -1,14 +1,13 @@
 # Verification record
 
-State: spec authored and Accepted 2026-09-20; implementation in
-progress — slice 1 (T1+T2, git observation port + adapter) landed
-2026-09-20, slice 2 (T3, artifact digesting + `artifacts` table, schema
-v3) landed 2026-09-20, slice 3 (T4, diagnostic runner port + adapter)
-landed 2026-09-20, slice 4 (T5, CLI surface + T6,
-observation/evidence ledger integration) landed 2026-09-20. This spec
-(0003) is NOT Verified, and no M2 milestone or Axiom v1 acceptance is
-claimed from it. Verification of the implementation will be recorded
-here when a future implementation slice lands.
+State: spec authored and Accepted 2026-09-20; implementation complete
+and **Verified 2026-09-20** (slices 1–5, T1–T8; local
+`./scripts/check` 74 tests / 1280 assertions green, branch CI run
+35533256619 success, and every implementation acceptance gate in
+acceptance.md passed review — see the slice-5 section below). No M2
+milestone or Axiom v1 acceptance is claimed from this spec alone;
+milestone gates belong to the design's M2 gate review. Slice 5 (final
+slice) merged as PR #11 after the branch run was green.
 
 ## Spec acceptance evidence — 2026-09-20
 
@@ -518,15 +517,175 @@ Recorded deviations and limits:
   remain open. The spec as a whole is still NOT Verified, and no M2
   milestone or Axiom v1 acceptance is claimed.
 
+## Slice 5 evidence — T7 adversarial/boundary tests + T8 check gates, 2026-09-20
+
+Branch `feat/0003-verification`, one focused PR per the Axiom
+autopilot (never pushed directly to `main`). No HomeKV-specific
+content; all fixtures synthetic.
+
+### T7 — coverage audit
+
+Audited `test/axiom/git_test.clj`, `runner_test.clj`,
+`observations_test.clj` and `store_test.clj` (`artifacts_test.clj`
+holds the 0003 store coverage) against the T7 list. Already covered
+by slices 1–4, not duplicated:
+
+- Symlink-escape classification: `path-safety-pure` (lexical
+  classification of escaping/absolute/unresolvable targets, never
+  touching the filesystem), `symlink-escape-is-unsafe` (committed
+  `../../escape` → `:escapes-worktree`, `/etc/hostname` →
+  `:absolute-target`), `dirty-symlink-escape-is-unsafe` (dirty
+  worktree `../escape`).
+- Submodules typed and not recursed: `submodule-is-typed-not-recursed`
+  (typed with the submodule commit; `sub/inner.txt` never enumerated).
+- `..`-escaping reported paths → `:operational`:
+  `observation-validation` (a `../escape.txt` change entry fails
+  `build-observation` operationally, never normalized).
+- Dirty worktree: `dirty-worktree` (HEAD SHA + dirty file list;
+  `:git/tree` is the HEAD commit's tree; no `:git/dirty-tree` key in
+  subject or value).
+- Runner timeout/cancellation/output-cap → `:incomplete`:
+  `adapter-timeout` (`:timed-out`, `:bound-exceeded
+  :timeout-seconds`, settled well under the 30 s sleep),
+  `adapter-output-cap` (`:output-capped`, exactly 16 bytes captured,
+  digest of the captured bytes), `adapter-cancellation`
+  (`:cancelled`, `cancel!` true then false after settle),
+  `run-record-construction` (every non-completed outcome is
+  `:run/complete? false` / `:run/result :incomplete`; inconsistent
+  combinations rejected; tampered records fail validation), and
+  `cli-run-command` (`sleep-probe seconds=30` → exit 5 with
+  `:timed-out` / `:timeout-seconds` / `:incomplete`).
+- Retention-bound exceeded → operational with named reason:
+  `artifacts_test` "Retention bounds" (`:max-artifact-bytes-exceeded`
+  and `:max-retained-artifacts-exceeded`, each with `:bound` and
+  `:actual`; exact-bound payload allowed; expired/superseded rows
+  excluded from the cap; a failed record leaves no row).
+- Tampered/malformed artifact rows detected on read:
+  `artifacts_test` "Tampered rows detected on read" (direct-SQL
+  tampering of each column → `:operational` `:malformed-artifact-row`
+  with the offending column named, via both `read-artifact` and
+  `list-artifacts`).
+
+Two genuine gaps, added in this slice:
+
+- `unsafe-symlink-excluded-from-digestion` (`git_test.clj`): a
+  synthetic repo whose committed symlink escapes the worktree root and
+  names a real file with distinctive bytes outside the repository.
+  Asserts the entry is `:path/kind :unsafe` with the raw link text as
+  `:path/target` and `:escapes-worktree` reason, that the entry's key
+  set is exactly `axiom.git/change-entry-fields` (no content or
+  digest keys — excluded from digestion at the data level), and that
+  the outside file's bytes appear nowhere in the printed observation.
+- `incomplete-runs-cannot-satisfy-obligations` (`runner_test.clj`):
+  builds run records for `:timed-out`, `:cancelled` and
+  `:output-capped` via the pure `build-run-record` and asserts each
+  carries `:run/complete? false` / `:run/result :incomplete` with a
+  nil exit. A data-level obligation gate — a record satisfies an
+  evidence obligation only if `:run/complete?` is true and
+  `:run/result` is `:pass`, mirroring the production invariant
+  stated in `validate-run-record!` — rejects all three incomplete
+  records while admitting a clean completed `:pass` record (a
+  completed `:fail` record is also not satisfying). The 0003 evidence
+  path never feeds the 0001 prover (observations/evidence are
+  provenance; `extract-events` yields zero 0001 events per the T6
+  tests), so the record's own markers are the gate.
+
+### T8 — `scripts/check` 0003 gates
+
+`scripts/check` gains a 0003 section (modeled on the 0002 gates),
+all on synthetic fixtures in temp dirs:
+
+- Builds a synthetic git repo: `init -b main`, a base commit, a
+  `feature` branch commit adding `b.txt` plus a symlink `link →
+  a.txt`, then a dirty change (`a.txt` modified, `c.txt` untracked).
+- `observe-git --repo` exits 0; the report's `:git/base`,
+  `:git/head`, `:git/tree` are byte-identical across two runs and
+  equal the fixture's `git rev-parse` ground truth; the dirty file
+  list is present, no `dirty-tree` key appears, and the symlink is
+  typed (`:path/kind :symlink`).
+- `digest --path` exits 0; `:artifact/digest` equals `sha256sum` on
+  the same bytes and `:artifact/size-bytes` equals `wc -c`.
+- `run --command true-probe` exits 0 with `:trust/local-diagnostic`
+  and `:run/result :pass`; `run --command sleep-probe
+  --args seconds=30` exits 5 with a `:timed-out` record (the
+  registry's fixed 5 s timeout; the `seconds` slot allows 0–30).
+- Seeds a synthetic ledger via the 0002 append path (one scenario,
+  one `:observation` event from `observe-git` on the synthetic repo,
+  one `:evidence-record` event from a real `true-probe` run);
+  `replay --ledger` exits 0 and shows `:observation/kind
+  :git-observation` and `:run/kind :diagnostic-run` entries carrying
+  `:trust/local-diagnostic`, the recorded observation head SHA and
+  the recorded evidence stdout digest.
+- Exit contracts: `observe-git --repo /nonexistent`, `digest --path
+  /nonexistent` and `run --command bogus-probe` exit 4;
+  `observe-git` on a non-repo directory and the timed-out
+  `sleep-probe` exit 5. The 0001/0002 gates run unchanged earlier in
+  the script.
+
+### Verification run (Temurin 17.0.20, Clojure 1.12.0)
+
+Exact command: `./scripts/check` from the repo root.
+
+- **74 tests, 1280 assertions, 0 failures, 0 errors** (baseline was
+  72/1257; +2 tests / +23 assertions from this slice).
+- All 0001/0002 CLI exit gates unchanged (evaluate allow 0 /
+  missing 3 / stale 3 / failed 2; status/next/explain 0 with
+  `:explained? true` and decision-identity match/mismatch;
+  replay/export-bundle 0/4/5; ledger tamper gate still exits 5;
+  bundle replay decision ids match ledger replay).
+- All new 0003 gates pass (see the run transcript: observe-git
+  identical SHAs, digest matches sha256sum, true-probe exit 0 with
+  `:trust/local-diagnostic`, sleep-probe exit 5 with `:timed-out`,
+  replay shows the recorded observation/evidence with digests and
+  trust marks, 4 on invalid input, 5 on operational failure).
+- `git diff --check` clean.
+- Branch CI: run 35533256619 on `6ba4c1d7` (feat/0003-verification):
+  success (green from a clean checkout; run transcript shows the same
+  74/1280 gate output as the local run).
+
+### CLI exit probes (by hand, same machine)
+
+- `observe-git --repo <synthetic> --base <sha>` → 0; repeat run →
+  identical base/head/tree SHAs.
+- `digest --path <synthetic>` → 0, digest `== sha256sum` output.
+- `run --command true-probe` → 0, `:trust/local-diagnostic` present.
+- `run --command sleep-probe --args seconds=30` → 5 (`:timed-out`,
+  ~5 s wall time, well under the 30 s sleep).
+- `observe-git --repo /tmp/axiom-no-such-0003` → 4;
+  `digest --path /tmp/axiom-no-such-0003` → 4;
+  `run --command bogus-probe` → 4;
+  `observe-git --repo <plain dir>` → 5.
+
+### Recorded deviations and limits
+
+- The T7 audit deliberately added only the two missing cases; no
+  existing coverage was duplicated.
+- Mode-change and Unicode-path enumeration exactness is by
+  construction (verbatim NUL-delimited pass-through of git's
+  `--raw -z` output; modes carried as `:change/old-mode` /
+  `:change/new-mode`) and was verified empirically by hand on this
+  machine (`chmod +x` → `:modified` with `100644`→`100755`;
+  `ünïcodé.txt` round-trips unmangled through `observe-git`), not
+  pinned by a committed test — the T7 list scoped test additions to
+  its enumerated cases.
+- The obligation-satisfaction gate in
+  `incomplete-runs-cannot-satisfy-obligations` is a test-local
+  predicate mirroring the production invariant documented in
+  `validate-run-record!`; no production satisfaction predicate for
+  0003 evidence records exists because nothing in 0003 consumes them
+  for obligation evaluation (M4/M5 action dispatch).
+- `run` in the check gates uses the checked-in registry's fixed
+  5 s `sleep-probe` timeout; the probe is synthetic and local.
+- Test evidence is bounded (synthetic fixtures), not a formal proof
+  or production trust attestation.
+
 ## Limits and deferred work
 
-- Implementation is in progress: `axiom.git` and
-  `axiom.adapters.git` landed in slice 1 (2026-09-20); artifact
-  digesting and the `artifacts` table (schema v3) landed in slice 2
-  (2026-09-20); `axiom.runner` and `axiom.adapters.runner` landed in
-  slice 3 (2026-09-20); the `observe-git`/`digest`/`run` CLI commands
-  and the `:observation`/`:evidence-record` ledger integration landed
-  in slice 4 (2026-09-20).
+- All implementation slices have landed (slice 5, this section, merged
+  as PR #11 2026-09-20); spec 0003 is Verified — the branch CI was
+  green and every implementation gate in acceptance.md passed review.
+  No M2 milestone or Axiom v1 acceptance is claimed from this spec
+  alone.
 - The local ledger remains single-process and tamper-evident, not
   tamper-proof (0002 R9, unchanged).
 - Inputs are unauthenticated; local observations and runner results are

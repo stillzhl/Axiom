@@ -76,20 +76,48 @@
   snapshots cover them by sequence with no special-casing; `:event/id`
   and `dedup/key` reuse rejected deterministically by the existing
   store behavior.)
-- [ ] T7: Adversarial and boundary tests: symlinks escaping the worktree
+- [x] T7: Adversarial and boundary tests: symlinks escaping the worktree
   reported `:path/unsafe` and excluded from digestion; submodules not
   recursed; `..`-escaping paths rejected operationally; dirty worktree
   reports head plus dirty file list with no synthetic tree SHA;
   runner timeout/cancellation/output-cap produce `:incomplete` results
   that cannot satisfy an obligation (dependent obligation `:unknown`);
   retention-bound exceeded is operational; tampered artifact digest rows
-  detected on read. Synthetic fixtures only.
-- [ ] T8: Verification and `scripts/check` gates: extend `scripts/check`
+  detected on read. Synthetic fixtures only. (Landed 2026-09-20, slice
+  5: PR "test: verify 0003 implementation (boundary tests, check gates,
+  verification record)". Audit against the T7 list found most cases
+  already covered by slices 1–4 — symlink-escape classification
+  (committed, dirty, pure), submodule typing without recursion,
+  `..`-escape → `:operational`, dirty worktree (head + dirty list, no
+  dirty-tree key), runner timeout/cancel/output-cap → `:incomplete`
+  with named bounds, retention-bound failures with bound and actual
+  named, tampered-row detection on read. Added only the two genuine
+  gaps: `unsafe-symlink-excluded-from-digestion` (the escaping link's
+  target content never enters the observation; the entry carries
+  exactly the change-entry fields, raw link text and reason) and
+  `incomplete-runs-cannot-satisfy-obligations` (data-level gate:
+  only a clean completed `:pass` run can satisfy an evidence
+  obligation; timeout/cancel/output-cap records are rejected).)
+- [x] T8: Verification and `scripts/check` gates: extend `scripts/check`
   with 0003 gates (observe a synthetic git repo, digest a synthetic
   file, run a bounded synthetic command, record observation/evidence
   events in a ledger, replay and assert the recorded digests and trust
   marks; assert the 0001/0002 exit contracts are unchanged). Record exact
-  commands, results and limitations in verification.md.
+  commands, results and limitations in verification.md. (Landed
+  2026-09-20, slice 5: same PR. `scripts/check` gains a 0003 section:
+  synthetic repo (init, commit, branch, dirty change, symlink) →
+  `observe-git` exit 0 with identical base/head/tree SHAs on repeat
+  runs (also matching `git rev-parse` ground truth), dirty file list,
+  no synthetic tree SHA, symlink typed; `digest --path` exit 0 with the
+  digest equal to `sha256sum` on the same bytes; `run true-probe`
+  exit 0 with `:trust/local-diagnostic`; `run sleep-probe
+  --args seconds=30` exits 5 with `:timed-out` (5 s registry timeout);
+  observation + evidence events recorded through the 0002 append path
+  in a synthetic ledger, `replay --ledger` asserts the recorded head
+  SHA, stdout digest and trust marks; `observe-git --repo
+  /nonexistent`, `digest --path /nonexistent`, `run --command bogus`
+  exit 4; `observe-git` on a non-repo dir exits 5. The 0001/0002
+  gates run unchanged earlier in the script.)
 
 Acceptance: `./scripts/check` green (Temurin 17.0.20, Clojure 1.12.0)
 with the 0003 gates; Git observation of a synthetic repo reproduces the

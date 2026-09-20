@@ -422,3 +422,42 @@
                                     {:registry reg :command/id "true-probe"
                                      :args {} :candidate (candidate)
                                      :run/id "run-override-2"})))))))
+
+;; ------------------------------------------------------------------
+;; T7 boundary: :incomplete records cannot satisfy an obligation
+
+(deftest incomplete-runs-cannot-satisfy-obligations
+  (testing "timeout, cancellation and output-cap mark the record :incomplete"
+    ;; The data-level obligation gate mirrors the production invariant
+    ;; stated in `validate-run-record!` ("every outcome except a clean
+    ;; :completed within bounds is marked :incomplete ... and can never
+    ;; satisfy an evidence obligation"): only a completed run with a
+    ;; :pass result can satisfy; anything else leaves the dependent
+    ;; obligation :unknown (never allowed). The 0003 evidence path
+    ;; never feeds the 0001 prover — observations and evidence are
+    ;; provenance — so the record's own markers are the gate.
+    (let [reg (registry-of (command-entry "true-probe"))
+          plan (runner/validate-run-request! reg (request "true-probe"))
+          satisfies? (fn [record]
+                       (and (true? (:run/complete? record))
+                            (= :pass (:run/result record))))]
+      (doseq [[outcome bound stdout] [[:timed-out :timeout-seconds (byte-array 0)]
+                                        [:cancelled nil (byte-array 0)]
+                                        ;; A capped stream honestly records
+                                        ;; exactly the cap in bytes.
+                                        [:output-capped :stdout-cap-bytes (byte-array 65536)]]]
+        (let [record (runner/build-run-record
+                      plan {:outcome outcome :exit nil
+                            :stdout-bytes stdout
+                            :stderr-bytes (byte-array 0)
+                            :bound-exceeded bound})]
+          (is (= outcome (:run/outcome record)))
+          (is (= false (:run/complete? record)))
+          (is (= :incomplete (:run/result record)))
+          (is (nil? (:run/exit record)))
+          (is (false? (satisfies? record)))))
+      (testing "only a clean completed :pass run satisfies; :fail does not satisfy either"
+        (let [pass-record (runner/build-run-record plan (exec :completed 0 "" "" nil))
+              fail-record (runner/build-run-record plan (exec :completed 1 "" "" nil))]
+          (is (true? (satisfies? pass-record)))
+          (is (false? (satisfies? fail-record))))))))
