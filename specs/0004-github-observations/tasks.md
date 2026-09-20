@@ -75,17 +75,30 @@
   skipped required jobs, failed reruns, unknown conclusions and
   dismissed reviews make obligations `:unknown`, never allow; fork
   ambiguity handled by always carrying the head repo owner/name.
-- [ ] T5: Implement `axiom.cli observe-github` and `axiom.cli check-pr`:
+- [x] T5: Implement `axiom.cli observe-github` and `axiom.cli check-pr`:
   thin adapters over the pure paths; EDN reports; exit 0/4/5 contract
   per R7; both read-only — never mutate provider state, never create,
-  migrate or write ledger files.
-- [ ] T6: Wire GitHub observations into the ledger: `:observation`
+  migrate or write ledger files. (Slice 3, 2026-09-20: done. Honest
+  limit: `observe-github` requires `--pr` in this slice — the 0004
+  observation schema (T1–T4) is PR-centric, so repo-at-SHA observation
+  without a PR is not supported; R7's `[--pr N]` optional syntax is
+  recorded as deferred. `check-pr` uses the default generic gates
+  `:pr-identity`, one required approval, `:merge-state`; pure consumers
+  can call `axiom.github/check-pr` with explicit gates including
+  `:required-checks`.)
+- [x] T6: Wire GitHub observations into the ledger: `:observation`
   payload records with `:observation/kind :github-observation`,
   validated by the 0003 schema plus the new kind's exact shape; append
   through the 0002 path (hash-chained, deduplicated, replay-ordered,
   snapshot-covered, bundle-included); `replay` shows provider
   observations; define the synthetic fixture format so fixture-recorded
-  decisions replay offline byte-identically.
+  decisions replay offline byte-identically. (Slice 3, 2026-09-20:
+  done. `ledger/record-observation` dispatches on `:observation/kind`:
+  `:git-observation` keeps `:trust/local-diagnostic`, `:github-observation`
+  accepts only `:trust/provider-observed` / `:trust/provider-authenticated`;
+  `:trust/remote-ci` and unknown kinds are rejected. No `check-pr`
+  report is persisted as a separate ledger decision — the advisory
+  report is recomputed byte-identically from replayed observations.)
 - [ ] T7: Adversarial and boundary tests: pagination failure mid-list,
   stale cache after base/head movement, rate-limit exhaustion, 403
   permission failure, unknown check conclusions, skipped required

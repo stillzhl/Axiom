@@ -1,12 +1,14 @@
 (ns axiom.ledger
   "Pure durable-ledger port (spec 0002), extended with observation and
-   evidence record kinds (spec 0003 R6). No I/O, no database access:
+   evidence record kinds (spec 0003 R6) and GitHub provider
+   observations (spec 0004 R6). No I/O, no database access:
    event envelope construction and validation, hash-chain verification,
    world reduction over stored envelopes, snapshot construction and
    verification, replay reports and decision export bundles. The SQLite
    adapter lives in axiom.store; this namespace never touches it."
   (:require [axiom.contract :as contract]
             [axiom.git :as git]
+            [axiom.github :as github]
             [axiom.model :as model]
             [axiom.nomos :as nomos]
             [axiom.runner :as runner]
@@ -54,19 +56,42 @@
 
 (def ^:private stored-envelope-fields (conj envelope-fields :seq))
 
+(defn- validate-observation!
+  "Dispatches observation validation to the pure port matching
+   :observation/kind, with the kind-appropriate trust check. Local Git
+   observations carry :trust/local-diagnostic; GitHub provider
+   observations carry :trust/provider-observed or
+   :trust/provider-authenticated — never :trust/remote-ci (0004 R9).
+   Unknown kinds are rejected (:invalid) and can never be written."
+  [observation]
+  (let [kind (:observation/kind observation)]
+    (cond
+      (= git/observation-kind kind)
+      (do (ensure! (= git/local-trust (:trust observation))
+                   "Git observation must carry local-diagnostic trust" {})
+          (git/validate-observation! observation))
+
+      (= github/observation-kind kind)
+      (do (ensure! (contains? github/trust-marks (:trust observation))
+                   "GitHub observation must carry a provider trust mark" {})
+          (github/validate-observation! observation))
+
+      :else
+      (model/invalid! "Unknown observation kind" {:observation/kind kind}))))
+
 (defn- validate-observation-record!
   "Strict validation of an :observation payload: the exact record shape,
-   plus the pure `axiom.git` port's observation validation. Unknown or
-   malformed observations are rejected (:invalid) and can never be
-   written. The trust check is explicit here as well as in the port:
-   local observations can never masquerade as trusted remote CI (R5)."
+   plus the pure observation port's validation dispatched on
+   :observation/kind. Unknown or malformed observations are rejected
+   (:invalid) and can never be written. The trust check is explicit here
+   as well as in the ports: local observations can never masquerade as
+   trusted remote CI, and provider observations can never carry
+   :trust/remote-ci (0004 R9)."
   [payload]
   (shape! payload #{:record/kind :observation} :observation-record)
   (let [observation (:observation payload)]
     (ensure! (map? observation) "Observation record must carry an observation" {})
-    (ensure! (= :trust/local-diagnostic (:trust observation))
-             "Observation must carry local-diagnostic trust" {})
-    (git/validate-observation! observation))
+    (validate-observation! observation))
   payload)
 
 (defn- validate-evidence-record!
@@ -173,17 +198,21 @@
       (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope)))))))
 
 (defn record-observation
-  "Pure construction of the envelope to store for a local Git
-   observation. The observation is validated with the pure `axiom.git`
-   port — unknown or malformed observations are :invalid and can never
-   be written, and any trust level other than :trust/local-diagnostic
-   is rejected (R5). The envelope's :candidate/id is the content digest
-   of the observation (`axiom.model/candidate-id`): Axiom never invents
-   a candidate identity. Returns the envelope without :seq; the store
-   assigns the sequence transactionally."
+  "Pure construction of the envelope to store for an observation. The
+   observation is validated with the pure port matching its
+   :observation/kind — `axiom.git` for local Git observations,
+   `axiom.github` for GitHub provider observations; unknown or
+   malformed observations are :invalid and can never be written, and
+   the trust level must match the kind (local observations carry
+   :trust/local-diagnostic; provider observations carry
+   :trust/provider-observed or :trust/provider-authenticated, never
+   :trust/remote-ci). The envelope's :candidate/id is the content
+   digest of the observation (`axiom.model/candidate-id`): Axiom never
+   invents a candidate identity. Returns the envelope without :seq;
+   the store assigns the sequence transactionally."
   [prev-envelope {:keys [observation] :as inputs}]
   (ensure! (map? observation) "record-observation requires an observation map" {})
-  (git/validate-observation! observation)
+  (validate-observation! observation)
   (let [envelope (assoc (base-envelope prev-envelope inputs)
                         :candidate/id (model/candidate-id observation)
                         :payload {:record/kind :observation :observation observation})]

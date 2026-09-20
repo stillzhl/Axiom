@@ -1,7 +1,9 @@
 (ns axiom.cli
   (:require [axiom.adapters.git :as git-adapter]
+            [axiom.adapters.github :as github-adapter]
             [axiom.adapters.runner :as runner-adapter]
             [axiom.contract :as contract]
+            [axiom.github :as github]
             [axiom.ledger :as ledger]
             [axiom.model :as model]
             [axiom.nomos :as nomos]
@@ -239,6 +241,161 @@
                :output record}))))
       (usage-observations))))
 
+;; ------------------------------------------------------------------
+;; Spec 0004 commands: observe-github / check-pr (T5)
+
+(defn- usage-0004
+  "Usage for the 0004 GitHub observation commands. Kept separate from
+   `usage` so the 0001/0002 usage text stays byte-identical."
+  []
+  {:exit 4 :output {:error :usage
+                    :message (str "axiom observe-github --repo OWNER/NAME --pr N [--sha SHA] [--token-file PATH]"
+                                  " | axiom check-pr --repo OWNER/NAME --pr N [--token-file PATH]")}})
+
+(defn- parse-flag-pairs
+  "Parses operands as --flag value pairs into a map; nil when malformed
+   (odd operand count, unknown flag, non-string value, duplicate flag)."
+  [operands allowed]
+  (when (even? (count operands))
+    (let [pairs (map vec (partition 2 operands))]
+      (when (and (seq pairs)
+                 (every? (fn [[f v]] (and (contains? allowed f) (string? v))) pairs)
+                 (= (count pairs) (count (distinct (map first pairs)))))
+        (into {} pairs)))))
+
+(defn- parse-repo-slug
+  "Splits an OWNER/NAME slug into [owner name]; nil when the slug does
+   not have exactly two slash-separated segments. Segment shape is
+   validated by the adapter (invalid owner/repo names are :invalid)."
+  [slug]
+  (let [parts (str/split ^String slug #"/" -1)]
+    (when (= 2 (count parts)) parts)))
+
+(defn- parse-pr-number
+  "Parses a --pr argument as a long; unparseable input is :invalid.
+   Positivity is validated by the adapter."
+  [s]
+  (try (Long/parseLong ^String s)
+       (catch NumberFormatException _
+         (model/invalid! "Invalid --pr number" {:pr s}))))
+
+(defn- sha40?
+  "A 40-hex commit SHA."
+  [s]
+  (and (string? s) (boolean (re-matches #"[0-9a-f]{40}" s))))
+
+(defn- github-fixture-fetch-fn
+  "Fixture-mode fetch for offline runs: when AXIOM_GITHUB_FIXTURES names
+   an EDN fixture file (provider response snapshots keyed by request
+   URL, per the port's fixture format), returns an injected fetch fn;
+   nil otherwise, in which case the adapter uses the real network. This
+   is the CLI's offline-reproduction hook: `scripts/check` drives the
+   0004 gates through it with synthetic fixtures, no network."
+  []
+  (when-let [path (System/getenv "AXIOM_GITHUB_FIXTURES")]
+    (:fetch/fn (github-adapter/fixture-fetch (read-input path)))))
+
+(defn- github-env
+  "The environment map the GitHub adapter reads AXIOM_GITHUB_TOKEN from."
+  []
+  (into {} (System/getenv)))
+
+(defn- github-observe-opts
+  "Builds the adapter option map from parsed CLI flags: owner, repo,
+   pr, the optional :token-file, the real environment, and the
+   fixture-mode fetch when AXIOM_GITHUB_FIXTURES is set. A raw token is
+   never accepted here — credentials resolve out-of-band only."
+  [owner repo pr token-file]
+  (let [fetch-fn (github-fixture-fetch-fn)]
+    (cond-> {:owner owner :repo repo :pr pr :env (github-env)}
+      (some? token-file) (assoc :token-file token-file)
+      (some? fetch-fn) (assoc :fetch-fn fetch-fn))))
+
+(defn- github-args!
+  "Shared argument handling for the 0004 commands: parses the flag
+   pairs (allowed set varies per command) and validates the repo slug,
+   PR number and SHA shapes. Returns [owner repo pr sha token-file].
+   Malformed flags return the usage map (exit 4); invalid values throw
+   :invalid (exit 4)."
+  [operands allowed]
+  (let [opts (parse-flag-pairs operands allowed)]
+    (if (and opts (get opts "--repo") (get opts "--pr"))
+      (let [[owner repo] (parse-repo-slug (get opts "--repo"))]
+        (when (nil? owner)
+          (model/invalid! "Malformed --repo slug; expected OWNER/NAME" {:repo (get opts "--repo")}))
+        (let [pr (parse-pr-number (get opts "--pr"))
+              sha (get opts "--sha")]
+          (when (and (some? sha) (not (sha40? sha)))
+            (model/invalid! "Invalid --sha; expected a 40-hex commit SHA" {:sha sha}))
+          [owner repo pr sha (get opts "--token-file")]))
+      (usage-0004))))
+
+(def ^:private default-check-pr-gates
+  "The CLI's default advisory gate set for `check-pr`: PR identity, one
+   approval recorded on the head SHA, and merge state. Required-checks
+   needs repository-specific job names and selection rules, so it is
+   not in the default set — consumers with explicit job lists call the
+   pure `axiom.github/check-pr` directly."
+  [{:gate/id :pr-identity}
+   {:gate/id :approvals :required/approvals 1}
+   {:gate/id :merge-state}])
+
+(defn- observe-github!
+  "Thin adapter over `axiom.adapters.github/observe!`: emits the EDN
+   GitHub observation report. Read-only: never mutates provider state,
+   never creates, migrates or writes ledger files (recording an
+   observation goes through the 0002 append API, not the CLI).
+
+   --repo OWNER/NAME and --pr N are required (--pr because the adapter
+   observes pull requests; repository-at-SHA observation without a PR
+   is not implemented). --sha SHA optionally pins the expected head
+   SHA: a PR whose head moved is invalid input (exit 4).
+   --token-file PATH selects the credential file (missing/unreadable:
+   exit 4); otherwise AXIOM_GITHUB_TOKEN or anonymous observation.
+
+   Exit 0 on a complete validated report; exit 5 when the observation
+   is :observation/incomplete (failed page after bounded retries,
+   rate-limit exhaustion, stale cache) or a terminal API failure names
+   its reason."
+  [operands]
+  (let [parsed (github-args! operands #{"--repo" "--pr" "--sha" "--token-file"})]
+    (if (map? parsed)
+      parsed
+      (let [[owner repo pr sha token-file] parsed
+            observation (github-adapter/observe!
+                         (github-observe-opts owner repo pr token-file))]
+        (if (= :complete (:observation/status observation))
+          (do
+            (when (and (some? sha)
+                       (not= sha (get-in observation [:subject :git/head])))
+              (model/invalid! "Observed head SHA does not match --sha"
+                              {:expected sha
+                               :observed (get-in observation [:subject :git/head])}))
+            {:exit 0 :output observation})
+          ;; An incomplete observation is an honest operational failure
+          ;; naming the failing collection and page (R7: exit 5).
+          {:exit 5 :output observation})))))
+
+(defn- check-pr!
+  "Thin adapter over `axiom.adapters.github/observe!` and the pure
+   `axiom.github/check-pr`: emits the advisory check-pr report (EDN)
+   with per-gate outcomes bound to the exact base/head SHAs, exact
+   evidence links and the advisory-only can-merge summary. Advisory
+   only: not enforcement, not a merge, not a published check.
+   Read-only: never mutates provider state, never creates, migrates or
+   writes ledger files. Exit 0 on a valid advisory report; 4 on invalid
+   input; 5 when the underlying observation is incomplete."
+  [operands]
+  (let [parsed (github-args! operands #{"--repo" "--pr" "--token-file"})]
+    (if (map? parsed)
+      parsed
+      (let [[owner repo pr _sha token-file] parsed
+            observation (github-adapter/observe!
+                         (github-observe-opts owner repo pr token-file))]
+        (if (= :complete (:observation/status observation))
+          {:exit 0 :output (github/check-pr observation default-check-pr-gates)}
+          {:exit 5 :output observation})))))
+
 (defn run [args]
   (try
     (let [[command & operands] args]
@@ -286,6 +443,12 @@
 
         (= "observe-git" command)
         (observe-git! operands)
+
+        (= "observe-github" command)
+        (observe-github! operands)
+
+        (= "check-pr" command)
+        (check-pr! operands)
 
         (= "digest" command)
         (digest-file! operands)
