@@ -1,6 +1,6 @@
 # Tasks and acceptance gates
 
-- [ ] T1: Implement `axiom.github` (pure port): GitHub observation
+- [x] T1: Implement `axiom.github` (pure port): GitHub observation
   schema (`:observation/kind :github-observation`), the pagination data
   model (collection + completeness marker), identity rules (repo, PR,
   fork, workflow run, job, attempt, artifact), trust marks
@@ -8,6 +8,10 @@
   `:trust/remote-ci`), and strict validation via the 0001 EDN schemas.
   No I/O; no new production dependencies. Check conclusion vocabulary
   maps unknown values to `:unknown`, never to success.
+  (Landed 2026-09-20 in Slice 1, branch `feat/0004-github-port`:
+  `src/axiom/github.clj` + `test/axiom/github_test.clj`, synthetic
+  fixtures only; `./scripts/check` 92 tests / 1427 assertions, 0
+  failures.)
 - [ ] T2: Implement `axiom.adapters.github`: the only namespace touching
   the network, via `java.net.http.HttpClient` with declared timeouts,
   user agent and API version header. GET requests only — no code path
