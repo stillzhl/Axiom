@@ -28,6 +28,39 @@ explicitly declare completeness. Dependency tasks are evaluated for the same
 candidate and evidence but without reapplying the target task's changed-file
 set to each dependency. All task gates have at least one evidence obligation.
 
+## Read-only reporting (R8)
+
+`axiom.nomos` keeps all reporting pure. `evaluate` is refactored onto an
+internal `evaluate-all` that validates the scenario once and returns the
+replayed state plus per-task `{:result :rules}` entries in dependency order
+(without the target task's scope rule, which is added by `evaluate` exactly
+as before, so decision bytes are unchanged).
+
+- `(ready-tasks contract task-results)` returns, per contract task in id
+  order, `:eligible?` (every declared dependency evaluated to `:allow`),
+  the task's own result, `:unmet-dependencies` and
+  `:missing-prerequisites` (the `:reason`s of its own `:unknown` rules).
+  It does not consult wall-clock time, the network or the filesystem.
+- `(explain-decision decision)` and `(explain-decision decision expected-id)`
+  return a structured explanation: decision identity, mode, result, candidate
+  id, task, world revision, input digest, evaluated-at, limitations, and per
+  rule the rule id/version, subject, status, reason, support, plus derived
+  `:missing` inputs and a `:remediation` suggestion keyed from the
+  `[rule reason]` pair (nil for satisfied rules). When `expected-id` is
+  supplied and differs from the recomputed decision id, the explanation
+  reports `:explained? false` with `:reason :decision-id-mismatch` instead
+  of narrating a stale record.
+- `status-report`/`next-report` build the `status`/`next` payloads from the
+  same pure functions. `status` evaluates each task with its own scope rule
+  against the scenario's change observations and reports rule counts plus
+  non-satisfied rules as blockers. `next` splits `ready-tasks` into
+  `:eligible` and `:waiting`.
+
+`axiom.cli` stays a thin adapter: argument parsing, file reading via the
+existing bounded reader, and exit codes. Read-only commands return 0 when a
+valid report was produced. Malformed arguments, unreadable files and invalid
+scenarios keep exits 4/5. `explain` accepts an optional `--decision` id.
+
 Evidence selection first matches obligation, the complete candidate and an
 approved producer. Select the highest attempt per producer, then qualify its
 recipe/suite/profile; never fall back to an older passing recipe. Multiple

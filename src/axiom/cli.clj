@@ -19,17 +19,38 @@
           (catch java.nio.charset.CharacterCodingException _
             (throw (ex-info "Invalid UTF-8 input" {:axiom/error :invalid}))))))))
 
+(defn- usage []
+  {:exit 4 :output {:error :usage
+                    :message "axiom {validate|evaluate|status|next} --input SCENARIO.edn | axiom explain --input SCENARIO.edn [--decision DECISION_ID]"}})
+
+(def ^:private read-commands #{"validate" "evaluate" "status" "next"})
+
 (defn run [args]
   (try
-    (let [[command flag path & extra] args]
-      (if-not (and (#{"validate" "evaluate"} command) (= flag "--input") path (empty? extra))
-        {:exit 4 :output {:error :usage :message "axiom {validate|evaluate} --input SCENARIO.edn"}}
-        (let [scenario (read-input path)]
-          (if (= command "validate")
-            (do (contract/validate-scenario! scenario)
-                {:exit 0 :output {:valid? true :mode :offline-advisory}})
-            (let [decision (nomos/evaluate scenario)]
-              {:exit ({:allow 0 :deny 2 :defer 3} (:result decision)) :output decision})))))
+    (let [[command & operands] args]
+      (cond
+        (contains? read-commands command)
+        (if (and (= 2 (count operands)) (= "--input" (first operands)))
+          (let [scenario (read-input (second operands))]
+            (case command
+              "validate" (do (contract/validate-scenario! scenario)
+                             {:exit 0 :output {:valid? true :mode :offline-advisory}})
+              "evaluate" (let [decision (nomos/evaluate scenario)]
+                           {:exit ({:allow 0 :deny 2 :defer 3} (:result decision)) :output decision})
+              "status" {:exit 0 :output (nomos/status-report scenario)}
+              "next" {:exit 0 :output (nomos/next-report scenario)}))
+          (usage))
+
+        (= "explain" command)
+        (let [[flag path flag2 id] operands]
+          (if (and (= "--input" flag) (string? path)
+                   (or (nil? flag2) (and (= "--decision" flag2) (string? id))))
+            (let [scenario (read-input path)
+                  decision (nomos/evaluate scenario)]
+              {:exit 0 :output (nomos/explain-decision decision id)})
+            (usage)))
+
+        :else (usage)))
     (catch clojure.lang.ExceptionInfo e
       {:exit (if (= :invalid (:axiom/error (ex-data e))) 4 5)
        :output {:error (or (:axiom/error (ex-data e)) :operational) :message (.getMessage e)
