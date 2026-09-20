@@ -7,8 +7,8 @@ See [the full proposed design](design-plan.md) and
 | --- | --- | --- |
 | M0 — Bootstrap | In progress | Review foundation, CI evidence; add pinned lint/formatter tooling |
 | M1 — Pure offline kernel | First slice implemented | Source mappings/digests, richer evidence schemas, context/readiness commands, JSON interchange |
-| M2 — Durable local state | **Complete** (2026-09-20) | M2 gate review [docs/gate-reviews/m2-durable-local-state.md](gate-reviews/m2-durable-local-state.md): all design-listed M2 deliverables and gate conditions satisfied by Verified specs 0002 and 0003; next is the M3 milestone gate review |
-| M3 — GitHub observations | Planned | Accepted (0004): read-only authenticated provider observation, `check-pr` and advisory `can-merge`; implementation next |
+| M2 — Durable local state | **Complete** (2026-09-20) | M2 gate review [docs/gate-reviews/m2-durable-local-state.md](gate-reviews/m2-durable-local-state.md): all design-listed M2 deliverables and gate conditions satisfied by Verified specs 0002 and 0003 |
+| M3 — GitHub observations | **Complete** (2026-09-20) | M3 gate review [docs/gate-reviews/m3-github-observations.md](gate-reviews/m3-github-observations.md): all design-listed M3 deliverables and gate conditions satisfied by Verified spec 0004; open item is a documented `--pr` spec-compliance amendment; next is the M1 milestone gate review, then the M4 spec |
 | M4 — Enforced gate | Planned | Approved policy outside candidate, provider-bound checks and race-safe admission |
 | M5 — Supervised execution | Planned | Fake agent, isolated workers, leases/outbox, one real adapter |
 | M6 — Pilot and release | Planned | Holdout evaluation, measurable reliability, distribution and support |
