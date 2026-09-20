@@ -1,6 +1,6 @@
 # Tasks and acceptance gates
 
-- [ ] T1: Implement `axiom.gate` (pure port): gate decision model
+- [x] T1: Implement `axiom.gate` (pure port): gate decision model
   (`:allow` / `:deny` / `:defer` with named reasons), the five
   anti-bypass rules (R4) as pure predicates over validated
   observations, quarantine-safe input shape (no raw candidate strings
@@ -13,7 +13,7 @@
   renamed checks, edited-policy candidates, omitted verifications and
   stale successes and assert deny/defer with named reasons, never
   allow; unknown or malformed required inputs cannot admit actions.
-- [ ] T2: Implement `axiom.policy`: approved-policy loading from a
+- [x] T2: Implement `axiom.policy`: approved-policy loading from a
   deployment-configured source, SHA-256 content-digest pinning over the
   canonical EDN encoding, approval-event lookup
   (`:governance/policy-approved` with supersession chains), rejection

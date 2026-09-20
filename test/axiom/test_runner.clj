@@ -10,7 +10,9 @@
             [axiom.github-test]
             [axiom.adapters-github-test]
             [axiom.github-cli-ledger-test]
-            [axiom.github-adversarial-test]))
+            [axiom.github-adversarial-test]
+            [axiom.gate-test]
+            [axiom.policy-test]))
 
 (defn -main [& _]
   (let [{:keys [fail error]} (test/run-tests 'axiom.kernel-test
@@ -23,6 +25,8 @@
                                              'axiom.github-test
                                              'axiom.adapters-github-test
                                              'axiom.github-cli-ledger-test
-                                             'axiom.github-adversarial-test)]
+                                             'axiom.github-adversarial-test
+                                             'axiom.gate-test
+                                             'axiom.policy-test)]
     (shutdown-agents)
     (System/exit (if (zero? (+ fail error)) 0 1))))
