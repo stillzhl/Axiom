@@ -18,6 +18,9 @@ On Linux with Java 17+, curl and sha256sum:
 ./scripts/clj -m axiom.cli validate --input examples/synthetic-project/allow.edn
 ./scripts/clj -m axiom.cli evaluate --input examples/synthetic-project/allow.edn
 ./scripts/clj -m axiom.cli evaluate --input examples/synthetic-project/missing.edn
+./scripts/clj -m axiom.cli status --input examples/synthetic-project/allow.edn
+./scripts/clj -m axiom.cli next --input examples/synthetic-project/allow.edn
+./scripts/clj -m axiom.cli explain --input examples/synthetic-project/allow.edn
 ```
 
 The launcher downloads checksum-pinned Clojure jars to a local ignored cache.
@@ -29,6 +32,9 @@ dependency support. A validation exit of zero means well-formed input only.
 Implemented: strict bounded EDN, canonical candidate identity, an in-memory
 event reducer, accepted-spec/dependency/scope rules, candidate-bound evidence,
 freshness/rerun checks and structured decisions. Claims never satisfy tests.
+Read-only `status`/`next` report per-task decisions and eligible work; `explain`
+returns a structured per-rule explanation with missing inputs, remediation
+suggestions and decision-identity verification.
 
 The goal is eventually to **use Axiom to drive its own development**, starting
 with advisory self-evaluation and advancing to guarded agent execution. A

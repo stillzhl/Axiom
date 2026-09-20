@@ -157,3 +157,105 @@
 (deftest cli-results
   (is (= 4 (:exit (cli/run []))))
   (is (= 5 (:exit (cli/run ["evaluate" "--input" "does-not-exist.edn"])))))
+
+(defn- with-scenario-file [scenario f]
+  (let [file (java.io.File/createTempFile "axiom-scenario" ".edn")]
+    (try (spit file (pr-str scenario))
+         (f (.getPath file))
+      (finally (.delete file)))))
+
+(defn- chained-scenario []
+  (-> f/scenario
+      (update-in [:contract :tasks] conj {:id "T-002" :spec "S-001" :depends-on #{"T-001"}
+                                         :scope #{"src/"} :obligations #{"O-002"}})
+      (update-in [:contract :obligations] conj {:id "O-002" :kind :test-suite :suite "synthetic-unit" :profile "jdk17"})
+      f/rebind))
+
+(deftest status-report-shape
+  (let [report (nomos/status-report f/scenario)]
+    (is (= :status (:report report)))
+    (is (= :offline-advisory (:mode report)))
+    (is (= 1 (count (:tasks report))))
+    (is (= {:task "T-001" :result :allow :rules-summary {:satisfied 3} :blockers []}
+           (select-keys (first (:tasks report)) [:task :result :rules-summary :blockers]))))
+  (let [report (nomos/status-report (assoc f/scenario :events [f/claim]))
+        task (first (:tasks report))]
+    (is (= :defer (:result task)))
+    (is (= {:satisfied 2 :unknown 1} (:rules-summary task)))
+    (is (= [{:rule :evidence :rule/version 1 :subject "O-001" :status :unknown
+             :reason :missing-qualified-evidence :support []}]
+           (:blockers task)))))
+
+(deftest next-report-shape
+  (let [report (nomos/next-report f/scenario)]
+    (is (= :next (:report report)))
+    (is (= :offline-advisory (:mode report)))
+    (is (= ["T-001"] (mapv :task (:eligible report))))
+    (is (empty? (:waiting report)))
+    (is (true? (:eligible? (first (:eligible report))))))
+  (let [s (chained-scenario)
+        report (nomos/next-report s)
+        t2 (first (filter #(= "T-002" (:task %)) (:eligible report)))]
+    (is (= ["T-001" "T-002"] (mapv :task (:eligible report))))
+    (is (empty? (:waiting report)))
+    (is (true? (:eligible? t2)))
+    (is (= :defer (:result t2)))
+    (is (= [:missing-qualified-evidence] (:missing-prerequisites t2))))
+  (let [s (update (chained-scenario) :events (fn [events] (vec (rest events))))
+        report (nomos/next-report s)]
+    (is (= ["T-001"] (mapv :task (:eligible report))))
+    (is (= ["T-002"] (mapv :task (:waiting report))))
+    (is (= ["T-001"] (:unmet-dependencies (first (:waiting report)))))
+    (is (false? (:eligible? (first (:waiting report)))))))
+
+(deftest explain-decision-shape
+  (let [decision (nomos/evaluate f/scenario)
+        explanation (nomos/explain-decision decision)]
+    (is (true? (:explained? explanation)))
+    (is (= (:decision/id decision) (:decision/id explanation)))
+    (is (= :allow (:result explanation)))
+    (is (= :offline-advisory (:mode explanation)))
+    (is (every? #(and (:rule %) (:reason %) (:status %) (vector? (:missing %))) (:rules explanation)))
+    (is (every? nil? (map :remediation (:rules explanation))))
+    (is (= explanation (nomos/explain-decision decision))))
+  (let [decision (nomos/evaluate (assoc f/scenario :events []))
+        explanation (nomos/explain-decision decision)
+        evidence-rule (first (filter #(= :evidence (:rule %)) (:rules explanation)))]
+    (is (= :defer (:result explanation)))
+    (is (= [:evidence-record] (:missing evidence-rule)))
+    (is (string? (:remediation evidence-rule))))
+  (let [decision (nomos/evaluate f/scenario)
+        stale (nomos/explain-decision decision "bogus")]
+    (is (false? (:explained? stale)))
+    (is (= :decision-id-mismatch (:reason stale)))
+    (is (= "bogus" (:expected-decision stale)))
+    (is (= (:decision/id decision) (:actual-decision stale)))))
+
+(deftest cli-read-commands
+  (with-scenario-file f/scenario
+    (fn [path]
+      (let [status (cli/run ["status" "--input" path])
+            next (cli/run ["next" "--input" path])
+            explained (cli/run ["explain" "--input" path])]
+        (is (= 0 (:exit status)))
+        (is (= :status (:report (:output status))))
+        (is (= 0 (:exit next)))
+        (is (= :next (:report (:output next))))
+        (is (= 0 (:exit explained)))
+        (is (true? (:explained? (:output explained)))))
+      (let [decision-id (:decision/id (nomos/evaluate f/scenario))
+            matched (cli/run ["explain" "--input" path "--decision" decision-id])
+            mismatched (cli/run ["explain" "--input" path "--decision" "bogus"])]
+        (is (= 0 (:exit matched)))
+        (is (true? (:explained? (:output matched))))
+        (is (= 0 (:exit mismatched)))
+        (is (false? (:explained? (:output mismatched))))
+        (is (= :decision-id-mismatch (:reason (:output mismatched)))))))
+  (with-scenario-file f/scenario
+    (fn [path]
+      (is (= 4 (:exit (cli/run ["status"]))))
+      (is (= 4 (:exit (cli/run ["status" "--input"]))))
+      (is (= 4 (:exit (cli/run ["next" "--input" path "extra"]))))
+      (is (= 4 (:exit (cli/run ["explain" "--input" path "--decision"]))))
+      (is (= 4 (:exit (cli/run ["bogus" "--input" path]))))
+      (is (= 5 (:exit (cli/run ["status" "--input" "does-not-exist.edn"])))))))

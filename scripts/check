@@ -15,3 +15,20 @@ for pair in allow:0 missing:3 stale:3 failed:2; do
   fi
   printf '%s: exit %s (expected)\n' "$name" "$actual"
 done
+
+# R8 read-only reporting gates: status/next/explain exit 0 on valid reports.
+for cmd in status next explain; do
+  ./scripts/clj -m axiom.cli "$cmd" --input examples/synthetic-project/allow.edn >/dev/null
+  printf '%s: exit 0 (expected)\n' "$cmd"
+done
+explain_out=$(./scripts/clj -m axiom.cli explain --input examples/synthetic-project/allow.edn)
+printf '%s\n' "$explain_out" | grep -q ':explained? true' \
+  || { printf 'explain: expected :explained? true\n' >&2; exit 1; }
+decision_id=$(printf '%s\n' "$explain_out" | grep -o ':decision/id "[^"]*"' | head -1 | cut -d'"' -f2)
+match_out=$(./scripts/clj -m axiom.cli explain --input examples/synthetic-project/allow.edn --decision "$decision_id")
+printf '%s\n' "$match_out" | grep -q ':explained? true' \
+  || { printf 'explain --decision: expected :explained? true\n' >&2; exit 1; }
+mismatch_out=$(./scripts/clj -m axiom.cli explain --input examples/synthetic-project/allow.edn --decision bogus)
+printf '%s\n' "$mismatch_out" | grep -q ':decision-id-mismatch' \
+  || { printf 'explain --decision bogus: expected :decision-id-mismatch\n' >&2; exit 1; }
+printf 'explain: decision identity verified (match and mismatch)\n'

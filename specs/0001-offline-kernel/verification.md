@@ -4,6 +4,39 @@ State: local and clean-checkout verification passed; remote CI gate blocked by
 repository publication permissions.
 This does not mark the broader M0/M1 milestones or Axiom v1 Verified.
 
+## Local evidence — 2026-09-20 (T7: M1 read-only CLI)
+
+Environment: Linux, Temurin OpenJDK 17.0.20+8, Clojure 1.12.0; 256 MiB JVM heap.
+Dependencies are version- and SHA-256-pinned in `scripts/dependencies.lock`.
+
+`./scripts/check` passed: 15 tests, 707 assertions, zero failures/errors;
+scenario validation passed; separate CLI processes returned allow=0,
+missing=3, stale=3, failed=2 (unchanged contract). Read-only gates:
+`status`, `next` and `explain` returned exit 0 on the synthetic scenarios;
+`explain --decision <id-from-evaluate>` reported `:explained? true` and
+`explain --decision bogus` reported `:explained? false` with
+`:reason :decision-id-mismatch`. `git diff --check` passed.
+
+`evaluate` was refactored onto a shared pure `evaluate-all`; decision maps and
+`:decision/id` digests for the four synthetic scenarios are byte-identical to
+the pre-refactor implementation (verified by re-running `evaluate` on all
+examples and comparing digests before/after — no drift).
+
+T6 acceptance (R1–R7) re-ran green as part of this check: the full regression
+corpus, strict-schema adversarial cases, determinism/replay invariants and the
+four scenario exit codes all pass.
+
+| Requirement | Test evidence |
+| --- | --- |
+| R1 | `bounded-data-reader`, `strict-schemas`, `malformed-field-types`, `path-safety` |
+| R2 | `canonical-identity`, `candidate-mutation-invalidates-evidence`, generated map-order invariants |
+| R3 | `replay-and-generated-invariants`, duplicate-event rejection |
+| R4 | `admission-corpus`, `dependency-gates`, `path-safety` |
+| R5 | `candidate-mutation-invalidates-evidence`, `reruns-and-conflicts`, `admission-corpus` |
+| R6 | `cli-results` and four real CLI process exits in `scripts/check` |
+| R7 | Above regression corpus, 100 generated claim/map-order cases; existing MIT license preserved |
+| R8 | `status-report-shape`, `next-report-shape`, `explain-decision-shape`, `cli-read-commands`; `status`/`next`/`explain` process exits and decision-identity match/mismatch gates in `scripts/check` |
+
 ## Local evidence — 2026-09-20
 
 Environment: Linux, OpenJDK 17.0.20+8, Clojure 1.12.0; 256 MiB JVM heap.
