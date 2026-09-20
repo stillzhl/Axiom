@@ -66,7 +66,7 @@
   and rejects raw token arguments; workflow name/path/event/actor
   have no second authoritative source, so their "consistency" is
   shape validation plus the run/job/attempt cross-checks above.)
-- [ ] T4: Implement `axiom.github/check-pr` (pure): advisory evaluation
+- [x] T4: Implement `axiom.github/check-pr` (pure): advisory evaluation
   over validated observations into per-gate outcomes bound to exact
   base/head SHAs with exact evidence links; `can-merge` as the
   advisory summary (not enforcement, not a merge, not a published
@@ -75,6 +75,10 @@
   skipped required jobs, failed reruns, unknown conclusions and
   dismissed reviews make obligations `:unknown`, never allow; fork
   ambiguity handled by always carrying the head repo owner/name.
+  (Landed in Slice 1 as the pure port behavior; consumers completed in
+  Slices 3–4 — the CLI `check-pr` (T5) consumes it, and the advisory
+  report is recomputed byte-identically from replayed observations
+  (T6). Checked off 2026-09-20 in the verification slice.)
 - [x] T5: Implement `axiom.cli observe-github` and `axiom.cli check-pr`:
   thin adapters over the pure paths; EDN reports; exit 0/4/5 contract
   per R7; both read-only — never mutate provider state, never create,
@@ -99,14 +103,32 @@
   `:trust/remote-ci` and unknown kinds are rejected. No `check-pr`
   report is persisted as a separate ledger decision — the advisory
   report is recomputed byte-identically from replayed observations.)
-- [ ] T7: Adversarial and boundary tests: pagination failure mid-list,
+- [x] T7: Adversarial and boundary tests: pagination failure mid-list,
   stale cache after base/head movement, rate-limit exhaustion, 403
   permission failure, unknown check conclusions, skipped required
   jobs, failed rerun selection, dismissed review on a moved head,
   fork head identity, matrix expansion selection, expired artifacts,
   forged producer, malformed provider payloads. Recorded fixture
   responses reproduce decisions offline (no live network in tests).
-- [ ] T8: Verification and `scripts/check` gates: extend `scripts/check`
+  (Landed 2026-09-20 in the verification slice, branch
+  `feat/0004-github-verification`. Audit of the T7 list against
+  slices 1–3 found most cases already covered there: mid-list page
+  failure naming collection/page/bound, nested jobs failure naming
+  the run, stale ETag cache hits after base/head movement, 403
+  terminal failures, unknown conclusions mapping to `:unknown`,
+  skipped jobs / timed-out reruns / missing jobs making gates
+  `:unknown`, dismissed and superseded-head approvals never counting,
+  matrix expansion with explicit selection rules, forged producers
+  `:invalid`, and malformed payloads naming the offending field.
+  Added only the four genuine gaps in
+  `test/axiom/github_adversarial_test.clj`: 429 rate-limit exhaustion
+  on a collection (the existing exhaustion test used 503s) naming the
+  bound and the 429 status; adapter-level fork PR head-repo identity
+  end to end; expired artifacts recorded intact (epoch seconds) plus
+  malformed `expires_at`/`digest` naming the field; a static test
+  enforcing that no test source references socket/network APIs.
+  `./scripts/check` 137 tests / 1651 assertions, 0 failures.)
+- [x] T8: Verification and `scripts/check` gates: extend `scripts/check`
   with 0004 gates driven entirely by synthetic recorded fixtures (no
   live network): observe a synthetic PR fixture to the end of
   pagination, assert completeness markers and exact SHAs, run
@@ -114,3 +136,20 @@
   assert exit 4 on invalid input and 5 on fixture-mode pagination
   failure, seed a ledger with a fixture observation and assert replay
   shows it; the 0001/0002/0003 exit contracts unchanged.
+  (Landed 2026-09-20 in the verification slice:
+  `examples/synthetic-github/fixtures.edn` (happy-path fixture set)
+  and `fixtures-pagination-failure.edn` (changed-files page 2 fails
+  503 on every attempt), plus the 0004 gates section in
+  `scripts/check`, all driven through the CLI's
+  `AXIOM_GITHUB_FIXTURES` hook with `AXIOM_GITHUB_TOKEN` unset — no
+  live network. Gates assert: `observe-github` exit 0, complete
+  status, exact base/head SHAs, 5/5 collections complete, both file
+  pages enumerated, `:trust/provider-observed`; `check-pr` exit 0,
+  3/3 gates pass, advisory can-merge `:yes` with `:advisory-only
+  true`, evidence links bound to the exact SHAs; exit 4 on missing
+  `--pr`, malformed slug and bad PR number; exit 5 on the
+  fixture-mode pagination failure (`:observation/incomplete` naming
+  `:changes` page 2); a ledger seeded with a fixture observation
+  replays showing the `:github-observation` entry with the recorded
+  head SHA, event id and trust mark. All 0001/0002/0003 gates and
+  exit contracts unchanged and passing.)

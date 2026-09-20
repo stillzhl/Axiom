@@ -1,0 +1,33 @@
+;; Synthetic recorded provider fixtures for the spec 0004
+;; `scripts/check` pagination-failure gate. Entirely invented:
+;; `synth-org/synth-repo`, synthetic 40-hex SHAs. The changed-files
+;; page 2 fails with 503 on every attempt, so the bounded retries are
+;; exhausted and the observation is `:observation/incomplete` naming
+;; the collection and page (the CLI maps this to exit 5).
+{"https://api.github.com/repos/synth-org/synth-repo/pulls/7"
+ {:fetch/status 200
+  :fetch/headers {}
+  :fetch/body {"number" 7
+               "title" "Synthetic change"
+               "state" "open"
+               "draft" false
+               "merged" false
+               "mergeable" true
+               "merge_state_status" "clean"
+               "base" {"sha" "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+               "head" {"sha" "cccccccccccccccccccccccccccccccccccccccc"
+                       "repo" {"owner" {"login" "synth-org"}
+                               "name" "synth-repo"}}
+               "url" "https://api.github.com/repos/synth-org/synth-repo/pulls/7"}}
+
+ "https://api.github.com/repos/synth-org/synth-repo/pulls/7/files?per_page=100"
+ {:fetch/status 200
+  :fetch/headers {"link" ["<https://api.github.com/repos/synth-org/synth-repo/pulls/7/files?per_page=100&page=2>; rel=\"next\""]}
+  :fetch/body [{"filename" "src/a.clj" "status" "modified"}]}
+
+ "https://api.github.com/repos/synth-org/synth-repo/pulls/7/files?per_page=100&page=2"
+ [{:fetch/status 503 :fetch/headers {} :fetch/body nil}
+  {:fetch/status 503 :fetch/headers {} :fetch/body nil}
+  {:fetch/status 503 :fetch/headers {} :fetch/body nil}
+  {:fetch/status 503 :fetch/headers {} :fetch/body nil}
+  {:fetch/status 503 :fetch/headers {} :fetch/body nil}]}
