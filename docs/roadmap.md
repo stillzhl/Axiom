@@ -7,7 +7,7 @@ See [the full proposed design](design-plan.md) and
 | --- | --- | --- |
 | M0 — Bootstrap | In progress | Review foundation, CI evidence; add pinned lint/formatter tooling |
 | M1 — Pure offline kernel | First slice implemented | Source mappings/digests, richer evidence schemas, context/readiness commands, JSON interchange |
-| M2 — Durable local state | In progress | SQLite ledger Verified (0002); Git observation, artifact digesting/retention and diagnostic runner Verified (0003); M2 milestone gate review next |
+| M2 — Durable local state | **Complete** (2026-09-20) | M2 gate review [docs/gate-reviews/m2-durable-local-state.md](gate-reviews/m2-durable-local-state.md): all design-listed M2 deliverables and gate conditions satisfied by Verified specs 0002 and 0003; next is the M3 milestone gate review |
 | M3 — GitHub observations | Planned | Accepted (0004): read-only authenticated provider observation, `check-pr` and advisory `can-merge`; implementation next |
 | M4 — Enforced gate | Planned | Approved policy outside candidate, provider-bound checks and race-safe admission |
 | M5 — Supervised execution | Planned | Fake agent, isolated workers, leases/outbox, one real adapter |
