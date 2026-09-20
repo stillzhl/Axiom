@@ -26,14 +26,19 @@
   `mark-artifact!`, `read-artifact`, `list-artifacts` with read-back
   validation; `recorded_seq` -1 sentinel reads back as nil; optional
   `:artifact/bytes` cross-check at record time.)
-- [ ] T4: Implement `axiom.runner` (pure port) and
+- [x] T4: Implement `axiom.runner` (pure port) and
   `axiom.adapters.runner`: command registry schema with approved command
   IDs and structured argument slots, no shell interpolation (explicit
   `:runner/shell` flag recorded when used), process spawn with timeout,
   cancellation and output caps, outcomes `:completed` / `:timed-out` /
   `:cancelled` / `:output-capped`, Evidence record construction with
   `:trust/local-diagnostic` marking and named limitations (no
-  CPU/memory/network isolation claimed).
+  CPU/memory/network isolation claimed). (Landed 2026-09-20, slice
+  3: PR "feat: implement 0003 diagnostic runner (port + adapter)".
+  Checked-in `resources/axiom/run-registry.edn` holds four generic
+  synthetic probes only; `run!`/`start!`/`cancel!` adapter API;
+  `:run/complete? false` / `:run/result :incomplete` on every
+  non-completed outcome.)
 - [ ] T5: Implement `axiom.cli observe-git` (`--repo PATH [--base REV]`),
   `axiom.cli digest` (`--path FILE`), `axiom.cli run` (`--command ID
   [--args ...]`): thin adapters over the pure paths; EDN reports; exit

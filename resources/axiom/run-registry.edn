@@ -1,0 +1,55 @@
+{:registry/version 1
+ :commands
+ {"true-probe"
+  {:command/id "true-probe"
+   :command/executable "/bin/true"
+   :command/args []
+   :command/workdir "/tmp"
+   :command/timeout-seconds 30
+   :command/stdout-cap-bytes 65536
+   :command/stderr-cap-bytes 65536
+   :command/applicability "Synthetic smoke probe: verifies the runner can spawn a process and collect a clean :completed result. Applies to runner health only, not to any consumer workload."
+   :runner/shell false}
+
+  "false-probe"
+  {:command/id "false-probe"
+   :command/executable "/bin/false"
+   :command/args []
+   :command/workdir "/tmp"
+   :command/timeout-seconds 30
+   :command/stdout-cap-bytes 65536
+   :command/stderr-cap-bytes 65536
+   :command/applicability "Synthetic failure probe: exits non-zero to verify the runner records a :completed run with :result :fail honestly. Applies to runner result reporting only."
+   :runner/shell false}
+
+  "sleep-probe"
+  {:command/id "sleep-probe"
+   :command/executable "/bin/sleep"
+   :command/args [{:slot/name "seconds"
+                   :slot/type :integer
+                   :slot/values nil
+                   :slot/min 0
+                   :slot/max 30
+                   :slot/max-length nil}]
+   :command/workdir "/tmp"
+   :command/timeout-seconds 5
+   :command/stdout-cap-bytes 65536
+   :command/stderr-cap-bytes 65536
+   :command/applicability "Synthetic timeout probe: sleeps for a caller-chosen duration (0-30s) to exercise the runner's timeout and cancellation paths. Applies to runner bound enforcement only."
+   :runner/shell false}
+
+  "echo-probe"
+  {:command/id "echo-probe"
+   :command/executable "/bin/echo"
+   :command/args [{:slot/name "message"
+                   :slot/type :string
+                   :slot/values nil
+                   :slot/min nil
+                   :slot/max nil
+                   :slot/max-length 256}]
+   :command/workdir "/tmp"
+   :command/timeout-seconds 30
+   :command/stdout-cap-bytes 1024
+   :command/stderr-cap-bytes 1024
+   :command/applicability "Synthetic output probe: echoes a caller-supplied message to exercise argument slots and output capture. Applies to runner argument/capture behavior only."
+   :runner/shell false}}}
