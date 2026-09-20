@@ -4,13 +4,14 @@ cd "$(dirname "$0")/.."
 cache="${AXIOM_JAR_CACHE:-$PWD/.cache/clojure}"
 mkdir -p "$cache"
 classpath="src:test:resources"
-while read -r artifact version digest; do
+while read -r group artifact version digest; do
+  case "$group" in ''|'#'*) continue;; esac
   jar="$cache/$artifact-$version.jar"
   if ! test -f "$jar"; then
     temp=$(mktemp "$cache/download.XXXXXX")
     trap 'rm -f "$temp"' EXIT
     curl --fail --silent --show-error --location --max-time 120 \
-      "https://repo.maven.apache.org/maven2/org/clojure/$artifact/$version/$artifact-$version.jar" -o "$temp"
+      "https://repo.maven.apache.org/maven2/$group/$artifact/$version/$artifact-$version.jar" -o "$temp"
     printf '%s  %s\n' "$digest" "$temp" | sha256sum --check --status
     mv "$temp" "$jar"
     trap - EXIT
