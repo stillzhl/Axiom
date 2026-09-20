@@ -5,10 +5,15 @@
 - [x] T3: Implement R2 canonical candidate identity and R3 event reduction.
 - [x] T4: Implement R4–R5 evidence qualification and Nomos rules.
 - [x] T5: Implement R6 CLI and synthetic scenarios.
-- [ ] T6: Verify R1–R7; record exact commands, results and limitations.
-- [ ] T7: Implement R8 read-only CLI (`status`, `next`, `explain`) on the
+- [x] T6: Verify R1–R7; record exact commands, results and limitations.
+  (Verified 2026-09-20: `./scripts/check` green locally — 15 tests, 707
+  assertions, 0 failures; CLI exits allow 0 / missing 3 / stale 3 / failed 2;
+  remote CI run on the T7 branch green; evidence in verification.md.)
+- [x] T7: Implement R8 read-only CLI (`status`, `next`, `explain`) on the
   pure `ready-tasks`/`explain-decision` functions; keep `evaluate` decision
   bytes unchanged; cover with unit and CLI tests plus `scripts/check` gates.
+  (Done 2026-09-20: merged as PR #2, `a9f10d3`. Decision digests for all
+  four synthetic scenarios byte-identical to the pre-refactor implementation.)
 
 Acceptance commands: `./scripts/check`, `./scripts/clj -m axiom.cli validate
 --input examples/synthetic-project/allow.edn`, and all four scenario evaluations.
