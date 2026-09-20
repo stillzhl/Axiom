@@ -1,16 +1,19 @@
 # Tasks and acceptance gates
 
-- [ ] T1: Implement `axiom.git` (pure port): Git observation schema,
+- [x] T1: Implement `axiom.git` (pure port): Git observation schema,
   change-set data model, path-safety classification as data (symlink /
   submodule / unsafe-path rules), observation validation via the 0001
   strict schemas, base/head/tree identity construction. No process
-  execution; no new production dependencies.
-- [ ] T2: Implement `axiom.adapters.git`: the only namespace invoking
+  execution; no new production dependencies. (Landed 2026-09-20, slice
+  1: PR "feat: implement 0003 git observation (port + adapter)".)
+- [x] T2: Implement `axiom.adapters.git`: the only namespace invoking
   the `git` executable. Read-only commands only (status/diff/rev-parse;
   no fetch, checkout, or mutation). Records `git --version` and exact
   command lines in provenance; reports incomplete enumeration as
   `:observation/incomplete`, never silently partial; classifies symlinks
   and submodules as typed entries without following or recursing.
+  (Landed 2026-09-20, slice 1; `axiom.cli`'s `git-commit` helper moved
+  here as `current-commit-sha`, behavior unchanged.)
 - [ ] T3: Implement artifact digesting and the `artifacts` table:
   SHA-256 over exact bytes, media type/size/location records, retention
   statuses (`retained`/`expired`/`superseded`), declared retention
