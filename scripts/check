@@ -48,7 +48,13 @@ obs_replay_out=$(mktemp /tmp/axiom-obs-replay-XXXXXX.edn)
 obs_a=$(mktemp /tmp/axiom-obs-a-XXXXXX.edn)
 obs_b=$(mktemp /tmp/axiom-obs-b-XXXXXX.edn)
 plain_dir=$(mktemp -d)
-trap 'rm -rf "$ledger_db" "$ledger_db-wal" "$ledger_db-shm" "$bundle_file" "$tampered_bundle" "$replay_out" "$ledger_tmp" "$git_repo" "$artifact_file" "$obs_ledger" "$obs_ledger-wal" "$obs_ledger-shm" "$obs_seed_log" "$obs_replay_out" "$obs_a" "$obs_b" "$plain_dir"' EXIT
+gh_obs=$(mktemp /tmp/axiom-gh-obs-XXXXXX.edn)
+gh_obs_fail=$(mktemp /tmp/axiom-gh-obs-fail-XXXXXX.edn)
+gh_check=$(mktemp /tmp/axiom-gh-check-XXXXXX.edn)
+gh_ledger=$(mktemp /tmp/axiom-gh-ledger-XXXXXX.db)
+gh_seed_log=$(mktemp /tmp/axiom-gh-seed-XXXXXX.log)
+gh_replay_out=$(mktemp /tmp/axiom-gh-replay-XXXXXX.edn)
+trap 'rm -rf "$ledger_db" "$ledger_db-wal" "$ledger_db-shm" "$bundle_file" "$tampered_bundle" "$replay_out" "$ledger_tmp" "$git_repo" "$artifact_file" "$obs_ledger" "$obs_ledger-wal" "$obs_ledger-shm" "$obs_seed_log" "$obs_replay_out" "$obs_a" "$obs_b" "$plain_dir" "$gh_obs" "$gh_obs_fail" "$gh_check" "$gh_ledger" "$gh_ledger-wal" "$gh_ledger-shm" "$gh_seed_log" "$gh_replay_out"' EXIT
 LEDGER_DB="$ledger_db" ./scripts/clj -e '
 (require (quote [axiom.store :as store]) (quote [axiom.ledger :as ledger]) (quote [axiom.contract :as contract]))
 (defn load-scenario [name]
@@ -248,3 +254,120 @@ actual=0; ./scripts/clj -m axiom.cli observe-git --repo "$plain_dir" >/dev/null 
 test "$actual" -eq 5 \
   || { printf 'observe-git non-repo dir: expected exit 5, got %s\n' "$actual" >&2; exit 1; }
 printf '0003 exits: 4 on invalid input, 5 on operational failure (expected)\n'
+
+# Spec 0004 gates: observe a synthetic PR fixture to the end of
+# pagination through the AXIOM_GITHUB_FIXTURES hook (no network),
+# assert completeness markers and exact SHAs, run check-pr and assert
+# the advisory outcomes with evidence links, assert exit 4 on invalid
+# input and 5 on fixture-mode pagination failure, seed a ledger with
+# a fixture observation and assert replay shows it. The 0001/0002/0003
+# gates above are unchanged.
+printf 'running the 0004 GitHub observation gates (synthetic fixtures, no network)\n'
+gh_fixtures="examples/synthetic-github/fixtures.edn"
+gh_fail_fixtures="examples/synthetic-github/fixtures-pagination-failure.edn"
+gh_base=$(printf 'b%.0s' {1..40})
+gh_head=$(printf 'c%.0s' {1..40})
+env -u AXIOM_GITHUB_TOKEN AXIOM_GITHUB_FIXTURES="$gh_fixtures" \
+  ./scripts/clj -m axiom.cli observe-github --repo synth-org/synth-repo --pr 7 > "$gh_obs"
+printf 'observe-github (fixture): exit 0 (expected)\n'
+grep -q ':observation/status :complete' "$gh_obs" \
+  || { printf 'observe-github: expected :observation/status :complete\n' >&2; exit 1; }
+grep -Fq "$gh_base" "$gh_obs" \
+  || { printf 'observe-github: expected exact base SHA\n' >&2; exit 1; }
+grep -Fq "$gh_head" "$gh_obs" \
+  || { printf 'observe-github: expected exact head SHA\n' >&2; exit 1; }
+test "$(grep -o ':pagination/complete true' "$gh_obs" | wc -l)" -eq 5 \
+  || { printf 'observe-github: expected 5 complete collections\n' >&2; exit 1; }
+grep -q ':pagination/pages 2' "$gh_obs" \
+  || { printf 'observe-github: expected the 2-page changed-file list\n' >&2; exit 1; }
+for f in src/a.clj src/b.clj src/new.clj; do
+  grep -Fq "\"$f\"" "$gh_obs" \
+    || { printf 'observe-github: expected paginated file %s\n' "$f" >&2; exit 1; }
+done
+grep -q ':trust/provider-observed' "$gh_obs" \
+  || { printf 'observe-github: expected :trust/provider-observed (anonymous)\n' >&2; exit 1; }
+printf 'observe-github: complete, exact SHAs, 5/5 collections complete, 2 file pages (expected)\n'
+
+env -u AXIOM_GITHUB_TOKEN AXIOM_GITHUB_FIXTURES="$gh_fixtures" \
+  ./scripts/clj -m axiom.cli check-pr --repo synth-org/synth-repo --pr 7 > "$gh_check"
+printf 'check-pr (fixture): exit 0 (expected)\n'
+test "$(grep -o ':gate/outcome :pass' "$gh_check" | wc -l)" -eq 3 \
+  || { printf 'check-pr: expected 3 passing gates\n' >&2; exit 1; }
+grep -q ':can-merge/advisory :yes' "$gh_check" \
+  || { printf 'check-pr: expected advisory can-merge :yes\n' >&2; exit 1; }
+grep -q ':can-merge/advisory-only true' "$gh_check" \
+  || { printf 'check-pr: expected advisory-only true\n' >&2; exit 1; }
+grep -q ':evidence/url' "$gh_check" \
+  || { printf 'check-pr: expected evidence links\n' >&2; exit 1; }
+grep -Fq "$gh_head" "$gh_check" \
+  || { printf 'check-pr: outcomes not bound to the exact head SHA\n' >&2; exit 1; }
+printf 'check-pr: 3/3 gates pass, advisory :yes, evidence links with exact SHAs (expected)\n'
+
+# 0004 exit contracts: invalid input -> 4 (including the recorded
+# deviation that --pr is required), operational failure -> 5.
+actual=0; AXIOM_GITHUB_FIXTURES="$gh_fixtures" \
+  ./scripts/clj -m axiom.cli observe-github --repo synth-org/synth-repo >/dev/null 2>&1 || actual=$?
+test "$actual" -eq 4 \
+  || { printf 'observe-github missing --pr: expected exit 4, got %s\n' "$actual" >&2; exit 1; }
+actual=0; AXIOM_GITHUB_FIXTURES="$gh_fixtures" \
+  ./scripts/clj -m axiom.cli observe-github --repo not-a-slug --pr 7 >/dev/null 2>&1 || actual=$?
+test "$actual" -eq 4 \
+  || { printf 'observe-github bad slug: expected exit 4, got %s\n' "$actual" >&2; exit 1; }
+actual=0; AXIOM_GITHUB_FIXTURES="$gh_fixtures" \
+  ./scripts/clj -m axiom.cli check-pr --repo synth-org/synth-repo --pr abc >/dev/null 2>&1 || actual=$?
+test "$actual" -eq 4 \
+  || { printf 'check-pr bad pr: expected exit 4, got %s\n' "$actual" >&2; exit 1; }
+actual=0
+env -u AXIOM_GITHUB_TOKEN AXIOM_GITHUB_FIXTURES="$gh_fail_fixtures" \
+  ./scripts/clj -m axiom.cli observe-github --repo synth-org/synth-repo --pr 7 > "$gh_obs_fail" 2>&1 || actual=$?
+test "$actual" -eq 5 \
+  || { printf 'observe-github pagination failure: expected exit 5, got %s\n' "$actual" >&2; exit 1; }
+grep -q ':observation/incomplete' "$gh_obs_fail" \
+  || { printf 'pagination failure: expected :observation/incomplete\n' >&2; exit 1; }
+grep -q ':collection :changes' "$gh_obs_fail" \
+  || { printf 'pagination failure: expected the failing collection named\n' >&2; exit 1; }
+grep -q ':page 2' "$gh_obs_fail" \
+  || { printf 'pagination failure: expected the failing page named\n' >&2; exit 1; }
+printf '0004 exits: 4 on invalid input, 5 on fixture-mode pagination failure (expected)\n'
+
+# Record one GitHub observation through the 0002 append path, then
+# replay and assert the recorded SHAs and trust marks.
+GH_DB="$gh_ledger" GH_FIXTURES="$gh_fixtures" ./scripts/clj -e '
+(require (quote [axiom.store :as store]) (quote [axiom.ledger :as ledger])
+         (quote [axiom.contract :as contract])
+         (quote [axiom.adapters.github :as gh-adapter]))
+(let [db (System/getenv "GH_DB")
+      fixtures (contract/read-data (slurp (System/getenv "GH_FIXTURES")))
+      handle (store/open! db {:create true})
+      ff (gh-adapter/fixture-fetch fixtures)
+      observation (gh-adapter/observe!
+                    {:owner "synth-org" :repo "synth-repo" :pr 7
+                     :env {}
+                     :fetch-fn (:fetch/fn ff)
+                     :sleep-fn (fn [_])
+                     :clock-fn (fn [] 1750000000000)})
+      stored (store/append! handle
+               (ledger/record-observation nil
+                 {:event/id "evt-0004-gh-1" :stream/id "synthetic-0004"
+                  :dedup/key "submit-0004-gh-1" :producer "synthetic-check"
+                  :observed/time 1000 :ingested/time 1005
+                  :observation observation}))]
+  (store/close! handle)
+  (println "SEED-GH-HEAD" (get-in observation [:subject :git/head]))
+  (println "SEED-GH-EVT" (:event/id stored))
+  (println "ledger seeded"))' > "$gh_seed_log"
+printf 'GitHub observation ledger seeded\n'
+./scripts/clj -m axiom.cli replay --ledger "$gh_ledger" > "$gh_replay_out"
+printf 'replay --ledger (0004): exit 0 (expected)\n'
+grep -q ':observation/kind :github-observation' "$gh_replay_out" \
+  || { printf 'replay: expected :github-observation entry\n' >&2; exit 1; }
+grep -q ':trust/provider-observed' "$gh_replay_out" \
+  || { printf 'replay: expected :trust/provider-observed mark\n' >&2; exit 1; }
+gh_seed_head=$(grep -o 'SEED-GH-HEAD [0-9a-f]*' "$gh_seed_log" | cut -d' ' -f2)
+gh_seed_evt=$(grep -o 'SEED-GH-EVT [^ ]*' "$gh_seed_log" | cut -d' ' -f2)
+grep -Fq "$gh_seed_head" "$gh_replay_out" \
+  || { printf 'replay: recorded observation head SHA missing\n' >&2; exit 1; }
+grep -Fq "$gh_seed_evt" "$gh_replay_out" \
+  || { printf 'replay: recorded observation event id missing\n' >&2; exit 1; }
+printf 'replay: GitHub observation recorded with exact SHAs and trust marks (expected)\n'
+printf '0004 gates: all green, no network touched\n'

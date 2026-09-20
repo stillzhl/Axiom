@@ -1,0 +1,102 @@
+;; Synthetic recorded provider fixtures for the spec 0004
+;; `scripts/check` gates. Entirely invented: `synth-org/synth-repo`,
+;; synthetic 40-hex SHAs, `synth-*` logins. No real repository
+;; identities, no live credentials.
+;;
+;; Format: request URL -> fixture response map (or a vector of response
+;; maps consumed in order, modelling retry sequences), per the
+;; `axiom.github` port fixture format. Header names are lower-case
+;; vectors, matching the adapter's real-fetch contract.
+{"https://api.github.com/repos/synth-org/synth-repo/pulls/7"
+ {:fetch/status 200
+  :fetch/headers {"etag" ["\"etag-pr-7\""]
+                  "x-ratelimit-limit" ["60"]
+                  "x-ratelimit-remaining" ["59"]
+                  "x-ratelimit-reset" ["1750000060"]}
+  :fetch/body {"number" 7
+               "title" "Synthetic change"
+               "state" "open"
+               "draft" false
+               "merged" false
+               "mergeable" true
+               "merge_state_status" "clean"
+               "base" {"sha" "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+               "head" {"sha" "cccccccccccccccccccccccccccccccccccccccc"
+                       "repo" {"owner" {"login" "synth-org"}
+                               "name" "synth-repo"}}
+               "url" "https://api.github.com/repos/synth-org/synth-repo/pulls/7"}}
+
+ "https://api.github.com/repos/synth-org/synth-repo/pulls/7/files?per_page=100"
+ {:fetch/status 200
+  :fetch/headers {"link" ["<https://api.github.com/repos/synth-org/synth-repo/pulls/7/files?per_page=100&page=2>; rel=\"next\""]}
+  :fetch/body [{"filename" "src/a.clj" "status" "modified"}]}
+
+ "https://api.github.com/repos/synth-org/synth-repo/pulls/7/files?per_page=100&page=2"
+ {:fetch/status 200
+  :fetch/headers {}
+  :fetch/body [{"filename" "src/b.clj" "status" "added"}
+               {"filename" "src/new.clj" "status" "renamed"
+                "previous_filename" "src/old.clj"}]}
+
+ "https://api.github.com/repos/synth-org/synth-repo/actions/runs?per_page=100"
+ {:fetch/status 200
+  :fetch/headers {}
+  :fetch/body {"total_count" 1
+               "workflow_runs"
+               [{"id" 101
+                 "name" "synth-ci"
+                 "path" ".github/workflows/synth-ci.yml"
+                 "event" "pull_request"
+                 "actor" {"login" "synth-actor"}
+                 "head_sha" "cccccccccccccccccccccccccccccccccccccccc"
+                 "conclusion" "success"
+                 "attempts_url" "https://api.github.com/repos/synth-org/synth-repo/actions/runs/101/attempts?per_page=100"
+                 "jobs_url" "https://api.github.com/repos/synth-org/synth-repo/actions/runs/101/jobs?per_page=100"
+                 "url" "https://api.github.com/repos/synth-org/synth-repo/actions/runs/101"}]}}
+
+ "https://api.github.com/repos/synth-org/synth-repo/actions/runs/101/attempts?per_page=100"
+ {:fetch/status 200
+  :fetch/headers {}
+  :fetch/body [{"attempt_number" 1
+                "conclusion" "success"
+                "url" "https://api.github.com/repos/synth-org/synth-repo/actions/runs/101/attempts/1"}]}
+
+ "https://api.github.com/repos/synth-org/synth-repo/actions/runs/101/jobs?per_page=100"
+ {:fetch/status 200
+  :fetch/headers {}
+  :fetch/body {"total_count" 1
+               "jobs"
+               [{"id" 201
+                 "name" "build"
+                 "run_id" 101
+                 "conclusion" "success"
+                 "run_attempt" 1
+                 "attempts_url" "https://api.github.com/repos/synth-org/synth-repo/actions/jobs/201/attempts?per_page=100"
+                 "url" "https://api.github.com/repos/synth-org/synth-repo/actions/jobs/201"}]}}
+
+ "https://api.github.com/repos/synth-org/synth-repo/actions/jobs/201/attempts?per_page=100"
+ {:fetch/status 200
+  :fetch/headers {}
+  :fetch/body [{"attempt_number" 1
+                "conclusion" "success"
+                "url" "https://api.github.com/repos/synth-org/synth-repo/actions/jobs/201/attempts/1"}]}
+
+ "https://api.github.com/repos/synth-org/synth-repo/pulls/7/reviews?per_page=100"
+ {:fetch/status 200
+  :fetch/headers {}
+  :fetch/body [{"id" 301
+                "user" {"login" "synth-reviewer"}
+                "state" "APPROVED"
+                "commit_id" "cccccccccccccccccccccccccccccccccccccccc"
+                "submitted_at" "2026-09-20T12:00:00Z"
+                "url" "https://api.github.com/repos/synth-org/synth-repo/pulls/7/reviews/301"}]}
+
+ "https://api.github.com/repos/synth-org/synth-repo/actions/artifacts?per_page=100"
+ {:fetch/status 200
+  :fetch/headers {}
+  :fetch/body {"total_count" 1
+               "artifacts"
+               [{"name" "synth-dist"
+                 "digest" "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                 "expires_at" "2026-10-20T12:00:00Z"
+                 "url" "https://api.github.com/repos/synth-org/synth-repo/actions/artifacts/401"}]}}}

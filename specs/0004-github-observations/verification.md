@@ -1,8 +1,9 @@
 # Verification record
 
-State: spec authored and Accepted 2026-09-20; implementation pending. No
-M3 milestone or Axiom v1 acceptance is claimed from this spec alone;
-milestone gates belong to the design's M3 gate review.
+State: spec authored and Accepted 2026-09-20; implementation landed in
+four slices and **Verified** 2026-09-20. No M3 milestone or Axiom v1
+acceptance is claimed from this spec alone; milestone gates belong to
+the design's M3 gate review.
 
 ## Spec acceptance evidence — 2026-09-20
 
@@ -237,6 +238,81 @@ Honest limits:
 Tasks: T5 and T6 are complete. No milestone Verified claim is made
 from this slice.
 
+## Slice 4 verification evidence — 2026-09-20
+
+Branch `feat/0004-github-verification`: T7 adversarial/boundary tests
+plus T8 `scripts/check` gates. Synthetic fixtures only; no network, no
+live credentials, no real repository identities (invented
+`synth-org/synth-repo`, synthetic 40-hex SHAs, `synth-*` logins,
+`synth-token-*` credentials); nothing HomeKV-specific.
+
+New files:
+
+- `test/axiom/github_adversarial_test.clj` — 4 tests covering the only
+  genuine gaps the T7 audit found (most T7 cases were already covered
+  by slices 1–3; see tasks.md): 429 rate-limit exhaustion on a
+  collection yields `:observation/incomplete` naming the bound and the
+  429 status (never a partial list); a fork PR observed end to end
+  carries the forker's owner/name as `:github/head-repo`, and
+  `check-pr` keeps fork and upstream refs distinct; expired artifacts
+  are recorded with their expiry intact (epoch seconds), and malformed
+  `expires_at`/`digest` fields are operational failures naming the
+  field; a static test scans all `test/` sources for socket/network
+  API references (`java.net.http`, `HttpClient`, socket classes) and
+  fails if any test could open a socket — every test runs the full
+  adapter logic against injected fixtures.
+- `examples/synthetic-github/fixtures.edn` — the recorded synthetic
+  provider fixture set driving the check gates (PR, 2 changed-file
+  pages, 1 run with 1 job, 1 approval on the head SHA, 1 artifact;
+  anonymous observation).
+- `examples/synthetic-github/fixtures-pagination-failure.edn` — the
+  changed-files page 2 fails with 503 on every attempt, exhausting the
+  bounded retries.
+
+Edited:
+
+- `test/axiom/test_runner.clj` — registers the new test namespace.
+- `scripts/check` — a 0004 gates section driven ENTIRELY by the
+  synthetic fixtures through the CLI's `AXIOM_GITHUB_FIXTURES` hook
+  (no live network): `observe-github` on the synthetic PR exits 0
+  with `:observation/status :complete`, the exact base/head SHAs, all
+  5 collections `:pagination/complete true`, both file pages
+  enumerated, and `:trust/provider-observed`; `check-pr` exits 0 with
+  3/3 gates `:pass`, advisory can-merge `:yes` with
+  `:advisory-only true`, evidence links bound to the exact SHAs; exit
+  4 on invalid input (missing `--pr`, malformed slug, bad PR number);
+  exit 5 on fixture-mode pagination failure
+  (`:observation/incomplete` naming `:changes` page 2); a ledger is
+  seeded with a fixture observation through the 0002 append path and
+  `replay` shows the `:github-observation` entry with the recorded
+  head SHA, event id and `:trust/provider-observed`. The
+  0001/0002/0003 gates and exit contracts are unchanged.
+
+Evidence:
+
+- `git diff --check` — clean.
+- `./scripts/check` (Temurin 17.0.20, Clojure 1.12.0): **137 tests,
+  1651 assertions, 0 failures, 0 errors** — up from the Slice 3
+  baseline (133 tests, 1627 assertions). All 0001/0002/0003 CLI gates
+  unchanged and passing (evaluate allow 0 / missing 3 / stale 3 /
+  failed 2; status/next/explain exit 0; replay/export-bundle 0/4/5;
+  ledger tamper gate exit 5; observe-git/digest/run 0/4/5). The 0004
+  gates print: observe-github complete with exact SHAs and 5/5
+  collections complete; check-pr 3/3 pass with advisory `:yes` and
+  evidence links; exits 4/5 as specified; replay shows the recorded
+  GitHub observation.
+- Zero network in the check path: `grep -rln "java.net.http"
+  test/ scripts/` is empty; no socket API references in `test/`
+  (enforced by the new static test); every 0004 gate sets
+  `AXIOM_GITHUB_FIXTURES` and `env -u AXIOM_GITHUB_TOKEN`, so the CLI
+  never reaches the real network fetch.
+
+Tasks: T4 is now checked (its consumers — the CLI `check-pr` and the
+ledger replay path — landed in slices 3–4). T7 and T8 are complete.
+Spec 0004 is **Verified** (implementation-complete); no M3 milestone
+or Axiom v1 acceptance is claimed from this spec alone — milestone
+gates belong to the design's M3 gate review.
+
 ## Limits and deferred work
 
 - Test evidence is bounded (synthetic fixtures), not a formal proof or
@@ -252,5 +328,20 @@ from this slice.
   gates; Axiom did not drive this spec run.
 - The network adapter (`axiom.adapters.github`, T2) and token/producer
   identity plumbing (T3) landed in Slice 2 above; CLI (T5) and ledger
-  wiring (T6) landed in Slice 3 above. Adversarial fixture tests (T7)
-  and 0004 `scripts/check` gates (T8) remain.
+  wiring (T6) landed in Slice 3 above; the pure `check-pr` (T4),
+  adversarial fixture tests (T7) and 0004 `scripts/check` gates (T8)
+  landed in Slice 4 above. Spec 0004 is Verified.
+
+## Open spec-compliance question (not a code change)
+
+- R7 writes `observe-github`'s `--pr` flag as `[--pr N]` (optional),
+  but the implementation requires `--pr` (exit 4 when missing) because
+  the 0004 observation schema and adapter (T1–T4) are PR-centric — a
+  repo-at-SHA observation without a PR has no defined observation
+  shape. The behavior was recorded as deferred in Slice 3 and is
+  re-recorded here as an open question, not papered over: either the
+  spec needs an amendment making `--pr` required (documenting
+  repo-at-SHA observation as out of scope), or a future slice must
+  define and implement the repo-at-SHA observation shape. Changing an
+  accepted spec's contract needs a spec amendment, not a code tweak,
+  so the behavior is intentionally unchanged in this slice.
