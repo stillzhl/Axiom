@@ -22,7 +22,7 @@
   lacks an approval event makes every gate `:defer` with reason
   `:no-approved-policy`; a candidate-branch policy source is refused
   structurally.
-- [ ] T3: Ledger integration: `:decision/gate-evaluation` and
+- [x] T3: Ledger integration: `:decision/gate-evaluation` and
   `:governance/*` payload kinds through the 0002 append path
   (transactional sequence, hash chain, event-id/dedup-key dedup),
   strict envelope validation extended for the new kinds (including

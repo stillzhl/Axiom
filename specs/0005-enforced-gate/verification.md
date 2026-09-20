@@ -119,6 +119,109 @@ Honest limits:
 - Test evidence is bounded synthetic observation, not a formal proof
   and not a production trust attestation.
 
+## Slice 2 evidence — T3 implemented (2026-09-20)
+
+Branch `feat/0005-gate-ledger` (PR: see merge record below). This slice
+implements task T3 only; T4–T8 remain open. Spec status remains
+**Accepted** — nothing is claimed Verified, and no M4 milestone
+acceptance is claimed from this slice.
+
+What landed:
+
+- `src/axiom/ledger.clj` — new payload kinds through the 0002 append
+  path, additive to the existing schema:
+  `:decision/gate-evaluation` (the verbatim `axiom.gate/evaluate`
+  output map: `:gate/decision`, named `:gate/reasons`, `:gate/candidate`,
+  `:gate/evaluator`, `:gate/policy` with digest plus approval-event
+  reference, `:gate/trust`) and `:governance` (one of
+  `:governance/policy-approved`, `:governance/policy-revoked`,
+  `:governance/verifier-config-approved`,
+  `:governance/protection-changed`, `:governance/admin-bypass`).
+  `record-gate-decision` / `record-governance` are pure envelope
+  constructors mirroring `record-observation` / `record-evidence`.
+- Strict envelope validation extended for the new kinds (0003-style
+  exact shapes plus per-kind rules):
+  - a decision carrying `:trust/remote-ci` is `:invalid` unless it
+    carries an evaluator-bound publication reference whose
+    `:publication/evaluator` equals the decision's `:gate/evaluator`
+    (no reference, wrong evaluator, and promotion from
+    `:trust/local-diagnostic` are all rejected);
+  - gate decisions require a non-blank evaluator identity and a
+    policy header with a sha256 digest and a non-blank
+    policy-approval reference — a run that cannot name its policy
+    approval is `:invalid`, never recorded;
+  - authorization-bearing governance kinds require an authorizer
+    identity (`:governance/authorizer`, or `:governance/approver`
+    for the `axiom.policy` approval-event shape) and a content
+    digest; `:governance/admin-bypass` requires the actor and the
+    reason; unknown kinds, unknown fields, and missing/mismatched
+    role identities are `:invalid`, never normalized.
+- 0002 invariants unchanged: transactional sequence, hash chain,
+  event-id/dedup-key dedup (duplicates rejected deterministically as
+  `:duplicate` / `:duplicate-event-id` / `:duplicate-dedup-key`),
+  forward-only migrations — schema v4 adds one covering index
+  (`idx_events_producer_seq`), additive only, never rewriting stored
+  payloads.
+- Replay: `replay-report` gains `:gate-decisions` (verbatim recorded
+  decision with its policy digest, `:reproduced? true`) and
+  `:governance` (verbatim events) sections. Replay-equivalence for
+  gate decisions is byte-identical reproduction of the stored record —
+  the decision is never re-derived from a different policy; integrity
+  rests on the hash chain + payload digest verification that precedes
+  the report. `extract-events` yields zero 0001 events for the new
+  kinds, so 0001/0002 decision bytes and snapshot world digests are
+  unchanged by their presence. Bundles carry the new kinds through
+  the 0002 path unchanged.
+- `src/axiom/store.clj` — migration 4; `supported-schema-version`
+  3 → 4 (referenced from `axiom.ledger`).
+- `test/axiom/gate_ledger_test.clj` — 9 new tests, 51 assertions,
+  registered in `test/axiom/test_runner.clj`: gate-decision and
+  governance round-trips verbatim through SQLite; replay of a prefix
+  reproduces the recorded decision with its policy digest; forged
+  `:trust/remote-ci` (no publication, wrong evaluator,
+  promoted-from-`:trust/local-diagnostic`) rejected at both the pure
+  constructor and the `store/append!` boundary with the ledger left
+  untouched; governance events with missing authorizer/digest/actor/
+  reason and unknown kinds → `:invalid`; decisions without evaluator
+  identity or policy-approval reference → `:invalid`; duplicate
+  governance events dedup via event-id and dedup-key; snapshot build/
+  verify / restore equivalence with the new kinds present; new kinds
+  contribute no 0001 world events; v3→v4 forward migration leaves
+  payload digests byte-identical; bundle export/read round-trip with
+  the new kinds. All fixtures synthetic (`synth-*`).
+- `specs/0005-enforced-gate/tasks.md`: T3 marked `[x]`.
+
+Evidence:
+
+- `git diff --check` — clean (runs inside `./scripts/check`).
+- `./scripts/check` (Temurin 17.0.20, Clojure 1.12.0): **176 tests,
+  1834 assertions, 0 failures, 0 errors** — the slice-1 baseline of
+  167 tests / 1784 assertions plus 9 new tests / 51 new assertions,
+  minus 1 redundant assertion removed from `artifacts_test.clj`
+  (it asserted schema version 3 twice after the v4 bump; now asserts
+  `store/supported-schema-version`). All 0001–0004 CLI gates pass
+  unchanged (exit contracts 0/4/5 verified end to end).
+- No HomeKV-specific content: every fixture, repo, SHA, login and
+  workflow in the new code and tests is invented (`synth-*`); no
+  live credentials, no real repository identities, no network.
+- No change to 0001–0004 decision bytes, exit contracts, or ledger
+  semantics beyond the additive payload kinds and the v4 index.
+
+Honest limits:
+
+- Replay `:reproduced? true` for gate decisions means the stored
+  record is reproduced byte-identically; it is not a re-evaluation
+  of the gate, and it proves nothing about the truth of the recorded
+  decision — only that the ledger preserved it intact.
+- The `:trust/remote-ci` ledger rule checks the *recorded*
+  publication reference; whether the publication actually happened
+  on the provider is T4 (checks adapter) territory, not proven here.
+- Test evidence is bounded synthetic observation, not a formal proof
+  and not a production trust attestation.
+- The checks adapter, capability computation, and CLI are T4–T6;
+  nothing in this slice touches the network or mutates provider
+  state.
+
 ## Limits and deferred work
 
 - Test evidence is bounded (synthetic fixtures), not a formal proof or
