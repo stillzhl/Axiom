@@ -7,7 +7,7 @@ See [the full proposed design](design-plan.md) and
 | --- | --- | --- |
 | M0 — Bootstrap | In progress | Review foundation, CI evidence; add pinned lint/formatter tooling |
 | M1 — Pure offline kernel | First slice implemented | Source mappings/digests, richer evidence schemas, context/readiness commands, JSON interchange |
-| M2 — Durable local state | Planned | SQLite replay/recovery, Git observation and bounded runner |
+| M2 — Durable local state | In progress | SQLite ledger Verified (0002); Git observation, artifact digesting/retention and diagnostic runner Accepted (0003), implementation next |
 | M3 — GitHub observations | Planned | Complete pagination, authenticated producer/recipe identity, runs/attempts/matrix semantics |
 | M4 — Enforced gate | Planned | Approved policy outside candidate, provider-bound checks and race-safe admission |
 | M5 — Supervised execution | Planned | Fake agent, isolated workers, leases/outbox, one real adapter |
