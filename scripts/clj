@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+cache="${AXIOM_JAR_CACHE:-$PWD/.cache/clojure}"
+mkdir -p "$cache"
+classpath="src:test:resources"
+while read -r artifact version digest; do
+  jar="$cache/$artifact-$version.jar"
+  if ! test -f "$jar"; then
+    temp=$(mktemp "$cache/download.XXXXXX")
+    trap 'rm -f "$temp"' EXIT
+    curl --fail --silent --show-error --location --max-time 120 \
+      "https://repo.maven.apache.org/maven2/org/clojure/$artifact/$version/$artifact-$version.jar" -o "$temp"
+    printf '%s  %s\n' "$digest" "$temp" | sha256sum --check --status
+    mv "$temp" "$jar"
+    trap - EXIT
+  fi
+  printf '%s  %s\n' "$digest" "$jar" | sha256sum --check --status
+  classpath="$classpath:$jar"
+done < scripts/dependencies.lock
+exec java -Xmx256m -Dfile.encoding=UTF-8 -cp "$classpath" clojure.main "$@"
