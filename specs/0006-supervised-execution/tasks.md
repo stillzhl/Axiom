@@ -78,7 +78,7 @@ Slice 1 (2026-09-20, PR #28): T1–T2 implemented in the pure
   worker requesting `:capability/shell` without a grant is
   rejected and no process is spawned; ungranted file writes
   are refused; two tasks never share a worktree identity.
-- [ ] T6: Patch admission and post-action verification:
+- [x] T6: Patch admission and post-action verification:
   `admit-patch` over the worktree diff (proposal coverage,
   lease currency, path safety per the 0002/0003 rules, class
   check), the pinned verification recipe run (0003 runner

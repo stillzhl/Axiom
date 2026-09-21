@@ -993,3 +993,47 @@
            :patch/digest (patch-digest diff)
            :patch/verification-recipe (:task/pinned-recipe task)
            :patch/task-id task-id})))))
+
+;; ------------------------------------------------------------------
+;; Budget enforcement (T7)
+;;
+;; Budgets are task data (`:budget/max-cost`, `:budget/max-attempts`,
+;; `:budget/max-wall-seconds`); cost is an abstract unit the
+;; adapters report per action. Enforcement is supervisor-side and
+;; pure: `check-budgets` compares the accumulated usage against the
+;; task's budgets and returns the actionable blocker
+;; `:budget-exhausted` when any budget is exceeded — never a silent
+;; partial result. The supervisor then records the task as
+;; `:task/blocked` with the blocker named.
+
+(defn- budget-limit
+  [task k]
+  (let [v (get task k)]
+    (when (and (integer? v) (pos? v)) v)))
+
+(defn check-budgets
+  "Pure budget check over (task, usage). `usage` is
+   `{:budget/cost <n>, :budget/attempts <n>,
+   :budget/wall-seconds <n>}`. Returns nil when every configured
+   budget still holds, or `:budget-exhausted` when any is exceeded.
+   Unconfigured budgets are unbounded; malformed usage is
+   `:invalid` (it can never pass the check silently)."
+  [task usage]
+  (cond
+    (not (and (map? task) (map? usage)
+              (every? #(and (integer? (get usage %))
+                            (not (neg? (get usage %))))
+                      [:budget/cost :budget/attempts :budget/wall-seconds])))
+    :invalid
+
+    :else
+    (let [limits {:budget/cost (:budget/max-cost task)
+                  :budget/attempts (:budget/max-attempts task)
+                  :budget/wall-seconds (:budget/max-wall-seconds task)}]
+      (when (some (fn [[k limit-key]]
+                    (let [limit (budget-limit task limit-key)]
+                      (and limit (> (get usage k) limit))))
+                  [[:budget/cost :budget/max-cost]
+                   [:budget/attempts :budget/max-attempts]
+                   [:budget/wall-seconds :budget/max-wall-seconds]])
+        :budget-exhausted))))

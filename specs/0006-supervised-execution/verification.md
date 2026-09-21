@@ -282,3 +282,56 @@ implementation (tasks T1–T8) is pending.
   verification recipe and records `:patch/admitted` with the
   evidence digest lands with the T8 `run-task` wiring. The
   agent adapters that produce diffs in the loop are T7.
+
+## Slice E evidence — T7 (2026-09-21)
+
+- New explicit adapter `axiom.adapters.agent` (R9): the agent
+  interface with `:agent/fake` and `:agent/process`
+  implementations, distinguished by declared `:agent/kind`.
+  The fake agent deterministically replays a fixture script of
+  `:proposal` / `:adversarial` steps (scripted moves:
+  `:scope-widen`, `:unauthorized-shell`, `:stale-token` —
+  returned as data, never executed); the process agent spawns
+  the worker as a bounded OS subprocess with argv from the
+  admitted proposal only (never invented), the environment
+  scrubbed of credential/token-shaped variables
+  (`scrub-env`), the workdir confined to the worktree
+  (validated via `resolve-path`), a wall-clock timeout with
+  SIGKILL on expiry, and cancellation via SIGKILL.
+  `start-agent` returns `{:agent/cancel!, :agent/wait!}` so the
+  supervisor holds the kill handle while the worker runs;
+  `run-agent` blocks via `wait!`. Stdout is parsed as EDN and
+  schema-validated as a proposal before the supervisor reads
+  it (`:invalid-output` otherwise); spawn failures are
+  `:spawn-failed`.
+- Supervisor-side budget enforcement: pure
+  `axiom.execute/check-budgets` over (task, usage) —
+  `:budget/max-cost`, `:budget/max-attempts`,
+  `:budget/max-wall-seconds`; any exceeded budget yields the
+  actionable blocker `:budget-exhausted` (the supervisor then
+  records `:task/blocked` with the blocker named — the
+  existing `:task/blocked` event carries `:task/blockers`);
+  unconfigured budgets are unbounded; malformed usage is
+  `:invalid`, never a silent pass.
+- New tests: `agent_test` (7 deftests — fake script replay
+  order and exhaustion; adversarial moves returned as data;
+  process happy path with argv-only spawn and schema-valid
+  output; runaway `sleep 30` SIGKILLed at a 500ms timeout;
+  `cancel!` SIGKILLs a live worker and `wait!` reports
+  `:cancelled`; non-EDN output → `:invalid-output`;
+  `scrub-env` removes credential vars; budget within/exceeded/
+  unbounded/malformed; and a guarded-loop integration where a
+  fake adversarial unauthorized-shell proposal is denied by
+  `evaluate-proposal` with `:unauthorized-capability`).
+  Every identity is `synth-*`; the process adapter runs only
+  local synthetic commands; no network, no live credentials.
+- `./scripts/check` on `feat/0006-agent-adapters`:
+  **284 tests, 2739 assertions, 0 failures, 0 errors**
+  (Temurin 17.0.20, Clojure 1.12.0); all CLI gates green
+  (0002–0005 replays, bundles, observations, gates), no
+  network, all fixtures `synth-*`.
+- Honest limits: the adapters are exercised directly and
+  through the pure evaluator; the supervisor loop that drives
+  them end-to-end (the T8 `run-task` wiring) is the next
+  slice. The fake agent's scripted proposals are fixtures;
+  the process agent never runs untrusted code in tests.
