@@ -78,3 +78,54 @@
                                     {:task/definition (pr-str (docs-task))
                                      :task/adapter "quantum"})]
       (is (= 4 exit)))))
+
+(deftest run-task-publishes-pr-only-when-authorized
+  (testing "a completed task publishes a PR only with :governance/publication-authorized"
+    (let [task (assoc (docs-task)
+                      :task/publication-authorized
+                      {:event/kind :governance/publication-authorized
+                       :task/id "synth-task-docs-1"
+                       :governance/policy-id "synth-policy-1"})
+          {:keys [supervisor/exit supervisor/report]} (supervisor/run-task {:task/definition (pr-str task)
+                                           :task/adapter "fake"})]
+      (is (= 0 exit))
+      (is (= :completed (:task/status report)))
+      (is (true? (:pr/published report)))
+      (is (string? (:pr/reference report))))))
+
+(deftest run-task-keeps-patch-local-without-publication-authorization
+  (testing "without the publication-authorized event the patch stays local"
+    (let [task (docs-task) ; no :task/publication-authorized
+          {:keys [supervisor/exit supervisor/report]} (supervisor/run-task {:task/definition (pr-str task)
+                                           :task/adapter "fake"})]
+      (is (= 0 exit))
+      (is (= :completed (:task/status report)))
+      (is (false? (:pr/published report)))
+      (is (nil? (:pr/reference report))))))
+
+(deftest run-task-self-modifying-requires-pinned-evaluator
+  (testing "a self-modifying task under the pinned previous evaluator is accepted"
+    (let [task (assoc (docs-task)
+                      :task/id "synth-task-selfmod-1"
+                      :task/class :task-class/self-modifying
+                      :task/pinned-evaluator "synth-evaluator-1"
+                      :task/evaluator "synth-evaluator-1")
+          {:keys [supervisor/exit supervisor/report]} (supervisor/run-task {:task/definition (pr-str task)
+                                           :task/adapter "fake"})]
+      ;; The task runs; the evaluator check passes (the task may
+      ;; complete or be blocked on other grounds, but not on the
+      ;; evaluator mismatch).
+      (is (= 0 exit))
+      (is (not= :invalid (:error report))))))
+
+(deftest run-task-self-modifying-rejects-candidate-evaluator
+  (testing "a self-modifying task under the candidate evaluator is refused"
+    (let [task (assoc (docs-task)
+                      :task/id "synth-task-selfmod-2"
+                      :task/class :task-class/self-modifying
+                      :task/pinned-evaluator "synth-evaluator-v1"
+                      :task/evaluator "synth-evaluator-v2-candidate")
+          {:keys [supervisor/exit supervisor/report]} (supervisor/run-task {:task/definition (pr-str task)
+                                           :task/adapter "fake"})]
+      (is (= 4 exit))
+      (is (= :invalid (:error report))))))

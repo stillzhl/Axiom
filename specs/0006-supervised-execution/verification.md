@@ -428,3 +428,34 @@ green but the audit identified integration gaps):
   test (the fake adapter is the deterministic offline path).
   Proposal events are not in the 0006 ledger schema —
   admissions are recorded in the report, not the ledger.
+
+## Slice G evidence — T8 completion (2026-09-21)
+
+- New `axiom.adapters.pr`: fake PR publication adapter with
+  `create-pr` (`:fake` kind records a `synth-pr-*` reference;
+  no merge code path exists anywhere) and the pure
+  `publication-authorized?` predicate.
+- Supervisor `run-task` now: (1) refuses a
+  `:task-class/self-modifying` task unless
+  `:task/pinned-evaluator` matches the supervisor's evaluator
+  (R11 — the candidate's own code is never the authority for
+  its own acceptance); (2) publishes a PR via the adapter
+  only when the task carries a recorded
+  `:governance/publication-authorized` event, otherwise the
+  patch stays local.
+- New tests: `pr_test` (3 deftests — fake publication,
+  invalid rejection, authorization predicate); 4 new
+  `supervisor_test` deftests (PR published when authorized,
+  patch stays local without authorization, self-modifying
+  accepted under pinned evaluator, refused under candidate
+  evaluator).
+- `./scripts/check` on `feat/0006-supervisor-complete`:
+  **297 tests, 2792 assertions, 0 failures, 0 errors**
+  (Temurin 17.0.20, Clojure 1.12.0); all CLI gates green,
+  no network, all fixtures `synth-*`.
+- Honest limits: the supervisor runs the synthetic loop
+  with in-memory/temp resources; the process adapter path is
+  exercised in `agent_test` but the full `run-task
+  --adapter process` loop is not covered by an automated
+  test. Proposal events are not in the 0006 ledger schema —
+  admissions are recorded in the report, not the ledger.
