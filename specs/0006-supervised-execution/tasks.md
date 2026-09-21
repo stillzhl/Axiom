@@ -105,7 +105,7 @@ Slice 1 (2026-09-20, PR #28): T1–T2 implemented in the pure
   the cancellation; an over-budget run stops with
   `:budget-exhausted` and the task is `:task/blocked` with the
   blocker named.
-- [ ] T8: CLI and verification: `run-task --task TASK-EDN
+- [x] T8: CLI and verification: `run-task --task TASK-EDN
   --adapter fake|process` driving one synthetic task
   end-to-end through the guarded loop (admission, projection,
   lease, proposal loop, patch admission, verification, and —
