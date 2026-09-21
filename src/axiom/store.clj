@@ -1000,3 +1000,171 @@
           (doseq [[_ lease] rebuilt]
             (insert-lease-row! conn lease))
           rebuilt)))))
+
+;; ------------------------------------------------------------------
+;; Action outbox (spec 0006 T4)
+;;
+;; Transactional outbox operations over the `:outbox/*` event kinds.
+;; The events table is the source of truth; the current outbox state
+;; is the pure fold `axiom.execute/outbox-intents` over the event
+;; prefix (`outbox-state`), so crash recovery is replay: on restart
+;; the supervisor re-reads the prefix and reconciles with
+;; `axiom.execute/reconcile-outbox`.
+;;
+;; Every operation runs in a `BEGIN IMMEDIATE` transaction: the
+;; write lock is taken before the read, so a read-check-then-write
+;; race (two supervisors recording the same idempotency key)
+;; serializes — the second sees the first's committed intent and
+;; deduplicates instead of recording a second execution.
+;;
+;; Fencing (T3): recording and transitioning intents requires the
+;; task's current fencing token — a stale worker cannot move
+;; intents. Supervisor-only: `:outbox/issued-by` must equal the
+;; lease's `:lease/issued-by` (the evaluator identity); the worker
+;; never records or transitions intents itself.
+;;
+;; Every function takes `now` — the supervisor's recorded time —
+;; for symmetry with the lease operations.
+
+(defn- outbox-events
+  "The `:outbox/*` event maps in ledger order — the replay
+   primitive everything outbox folds from."
+  [handle]
+  (map :outbox/event
+       (map :payload
+            (filter #(= :outbox (get-in % [:payload :record/kind]))
+                    (read-range handle 0 Long/MAX_VALUE)))))
+
+(defn outbox-state
+  "The live outbox projection: {idempotency-key intent} folded over
+   the `:outbox/*` events in ledger order. Read-only; this is the
+   replay primitive the supervisor uses on restart before
+   reconciling."
+  [handle]
+  (execute/outbox-intents (outbox-events handle)))
+
+(defn- outbox-envelope-inputs
+  "Builds the `ledger/record-outbox` inputs from the decided outbox
+   event and the caller's envelope overrides. `:record/producer`,
+   `:record/observed-time` and `:record/ingested-time` are required;
+   the event id, stream id and dedup key default deterministically
+   from the event — the dedup key makes a crash-retry of the same
+   recording idempotent at the 0002 layer as well. `task-id` is the
+   intent's task (terminal events don't carry it on the event map,
+   so the caller resolves it from the existing intent)."
+  [outbox-event input task-id]
+  (let [key (:outbox/idempotency-key outbox-event)]
+    {:event/id (or (:record/event-id input)
+                   ;; The raw idempotency key is not a valid 0002
+                   ;; event id (it contains ':'), so derive a
+                   ;; deterministic id from its digest.
+                   (str "outbox-event/"
+                        (subs (model/digest (str key "/" (name (:event/kind outbox-event))
+                                                 "/attempt-" (:outbox/attempt outbox-event 0)))
+                              7)))
+     :stream/id (or (:record/stream-id input)
+                    (str "task-stream/" task-id))
+     :dedup/key (or (:record/dedup-key input)
+                    ;; The raw idempotency key is not a valid 0002
+                    ;; dedup key (it contains ':'), so the key's
+                    ;; digest stands in. The attempt is part of the
+                    ;; dedup key so a re-drive (or a second
+                    ;; uncertainty marking after a re-drive) is a
+                    ;; distinct 0002 record, while a crash-retry of
+                    ;; the same recording is still idempotent.
+                    (str "outbox/" (subs (model/digest key) 7) "/"
+                         (name (:event/kind outbox-event))
+                         "/attempt-" (:outbox/attempt outbox-event 0)))
+     :producer (:record/producer input)
+     :observed/time (:record/observed-time input)
+     :ingested/time (:record/ingested-time input)
+     :outbox-event outbox-event}))
+
+(defn record-intent!
+  "Transactional intent recording. In one transaction: decides via
+   `axiom.execute/record-intent` against the in-transaction outbox
+   fold and the current-leases sidecar, and appends the
+   `:outbox/intent-recorded` event through the 0002 path
+   (transactional sequence, hash chain, dedup).
+
+   Returns `{:outbox/ok true, :outbox/intent <intent>,
+   :outbox/seq <event seq>}`. A resubmission of the same
+   idempotency key returns `{:outbox/ok false, :outbox/reason
+   :duplicate-intent, :outbox/existing <intent>}` — the existing
+   intent, never a second execution. A stale fencing token denies
+   with `:stale-fencing-token`; a non-supervisor issuer with
+   `:not-supervisor`; malformed input with `:malformed` — and
+   nothing is appended.
+
+   `input` carries `:outbox/task-id`, `:outbox/action` (keyword),
+   `:outbox/payload` (map), `:outbox/fencing-token` and
+   `:outbox/issued-by` (the supervisor/evaluator identity), plus
+   the `:record/*` envelope overrides (`:record/producer`,
+   `:record/observed-time`, `:record/ingested-time` required)."
+  [handle input now]
+  (let [^Connection conn (:connection handle)]
+    (with-immediate-tx conn
+      (fn []
+        (let [events (outbox-events handle)
+              intents (execute/outbox-intents events)
+              leases (read-current-leases conn now)
+              decision (execute/record-intent intents leases input)]
+          (if (not (:outbox/ok decision))
+            decision
+            (let [event (:outbox/event decision)
+                  envelope (ledger/record-outbox (head-envelope-in-tx conn)
+                                                 (outbox-envelope-inputs
+                                                  event input (:outbox/task-id input)))
+                  stored (append-in-tx! conn envelope)
+                  key (:outbox/idempotency-key event)]
+              {:outbox/ok true
+               :outbox/intent (get (execute/outbox-intents (concat events [event])) key)
+               :outbox/seq (:seq stored)})))))))
+
+(defn transition-intent!
+  "Transactional supervisor-only intent transition. In one
+   transaction: decides via `axiom.execute/transition-intent`
+   against the in-transaction outbox fold and the current-leases
+   sidecar, and appends the resulting `:outbox/*` event through the
+   0002 path.
+
+   The fencing token must match the task's current lease — a stale
+   worker's transition is denied with `:stale-fencing-token` and
+   nothing is appended. Unknown intents, illegal moves and
+   non-supervisor issuers are denied with named reasons. A move to
+   `:executing` is transient (supervisor-local, never recorded):
+   it returns `{:outbox/ok true, :outbox/transient true}` and
+   appends nothing.
+
+   `input` carries `:outbox/idempotency-key`,
+   `:outbox/to-state`, `:outbox/fencing-token`,
+   `:outbox/issued-by`, plus optional `:outbox/reason`
+   (`:failed`), `:outbox/detail` (`:uncertain`) and
+   `:outbox/provider-ref` (`:executed`), and the `:record/*`
+   envelope overrides."
+  [handle input now]
+  (let [^Connection conn (:connection handle)]
+    (with-immediate-tx conn
+      (fn []
+        (let [events (outbox-events handle)
+              intents (execute/outbox-intents events)
+              leases (read-current-leases conn now)
+              decision (execute/transition-intent intents leases input)]
+          (cond
+            (not (:outbox/ok decision))
+            decision
+
+            (:outbox/transient decision)
+            (dissoc decision :outbox/event)
+
+            :else
+            (let [event (:outbox/event decision)
+                  key (:outbox/idempotency-key event)
+                  envelope (ledger/record-outbox
+                            (head-envelope-in-tx conn)
+                            (outbox-envelope-inputs
+                             event input (:outbox/task-id (get intents key))))
+                  stored (append-in-tx! conn envelope)]
+              {:outbox/ok true
+               :outbox/intent (get (execute/outbox-intents (concat events [event])) key)
+               :outbox/seq (:seq stored)})))))))

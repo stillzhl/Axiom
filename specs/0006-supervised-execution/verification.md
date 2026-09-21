@@ -109,3 +109,65 @@ implementation (tasks T1–T8) is pending.
   not yet wired here. Note the fence check is first in
   `evaluate-proposal`'s spec order: it returns `:no-lease-held`
   itself when no lease exists.
+
+## Slice B evidence — T4 (2026-09-21)
+
+- `ledger/record-outbox`: strict per-kind validation of the four
+  `:outbox/*` kinds (`:outbox/intent-recorded`, `:outbox/executed`,
+  `:outbox/failed`, `:outbox/uncertain`) — unknown kind, missing
+  field, unknown field, non-keyword action, non-map payload or a
+  negative `:outbox/attempt` are `:invalid` and never writable.
+  Outbox events are additive: `extract-events` shows they
+  contribute zero 0001 world events, so the 0001 fold is
+  unchanged.
+- Pure `axiom.execute` outbox logic: `outbox-idempotency-key`
+  (deterministic over `(task-id, action, payload-digest)`),
+  `outbox-intents` (the replay fold), `record-intent` (duplicate
+  logical intents dedup on the key — terminal or not — never a
+  second execution), `transition-intent` (supervisor-only:
+  `:outbox/issued-by` must equal the lease's
+  `:lease/issued-by`; stale fencing tokens denied;
+  `:stale-fencing-token`, `:not-supervisor`, `:no-lease-held`,
+  `:unknown-intent`, `:illegal-transition` all named), and the
+  pure crash-recovery planner `reconcile-outbox` over
+  `(outbox-state, provider-state)`. `:executing` is the
+  supervisor's transient local state — never a ledger event.
+  Re-drives carry the intent identity forward under the same
+  idempotency key with a bumped `:outbox/attempt`, which also
+  keeps the 0002 dedup key distinct per drive.
+- `axiom.store`: `record-intent!` / `transition-intent!` /
+  `outbox-state` run in `BEGIN IMMEDIATE` transactions against
+  the in-transaction outbox fold and the current-leases sidecar,
+  appending through the 0002 path (transactional sequence, hash
+  chain, dedup). Event ids and dedup keys are derived
+  deterministically from the idempotency key's digest (the raw
+  key contains `:` which is not a valid 0002 id); the attempt
+  is part of the dedup key so a crash-retry stays idempotent
+  while a re-drive is a distinct record.
+- New tests: `execute_outbox_test` (5 deftests),
+  `store_outbox_test` (9 deftests) — 14 new deftests in total,
+  matching the 255 → 269 suite delta (2466 → 2599 assertions).
+  Every identity is `synth-*`; no network, no live
+  credentials.
+- T4 acceptance, machine-checked against a fake provider
+  double that records queries and executions separately:
+  (1) simulated crash after external success reconciles to
+  `:mark-executed` — exactly one provider write, one query,
+  never re-executed, and a second reconciliation is a no-op;
+  (2) duplicate intent submissions (sequential and two-thread
+  concurrent, `BEGIN IMMEDIATE` serializing) yield exactly one
+  `:outbox/intent-recorded` event; (3) an `:uncertain` intent
+  is resolved by provider query — effect present →
+  `:mark-executed` with zero additional executions, effect
+  absent → `:re-drive` under the same idempotency key — never
+  by blind re-execution.
+- `./scripts/check` on `feat/0006-action-outbox`:
+  **269 tests, 2599 assertions, 0 failures, 0 errors**
+  (Temurin 17.0.20, Clojure 1.12.0); all CLI gates green
+  (0002–0005 replays, bundles, observations, gates), no
+  network, all fixtures `synth-*`.
+- Honest limits: the reconciliation plan is pure; the
+  supervisor loop that drives it (query → plan → apply) is
+  caller-side and lands with the T8 `run-task` wiring. The
+  provider query interface is a test double here; the real
+  provider adapters are consumer-side.

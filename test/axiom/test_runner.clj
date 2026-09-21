@@ -21,7 +21,9 @@
             [axiom.execute-test]
             [axiom.ledger-0006-test]
             [axiom.execute-lease-test]
-            [axiom.store-lease-test]))
+            [axiom.store-lease-test]
+            [axiom.execute-outbox-test]
+            [axiom.store-outbox-test]))
 
 (defn -main [& _]
   (let [{:keys [fail error]} (test/run-tests 'axiom.kernel-test
@@ -45,6 +47,8 @@
                                              'axiom.execute-test
                                              'axiom.ledger-0006-test
                                              'axiom.execute-lease-test
-                                             'axiom.store-lease-test)]
+                                             'axiom.store-lease-test
+                                             'axiom.execute-outbox-test
+                                             'axiom.store-outbox-test)]
     (shutdown-agents)
     (System/exit (if (zero? (+ fail error)) 0 1))))
