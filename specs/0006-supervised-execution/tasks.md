@@ -90,7 +90,7 @@ Slice 1 (2026-09-20, PR #28): T1–T2 implemented in the pure
   patch under a standard task is denied with
   `:self-modification-requires-promotion`; admitted patches
   carry their verification evidence digest.
-- [ ] T7: Agent adapters: the `axiom.adapters.agent` interface
+- [x] T7: Agent adapters: the `axiom.adapters.agent` interface
   with the `:fake` implementation (deterministic scripts from
   fixtures, including scripted adversarial moves: a
   scope-widening proposal, an unauthorized shell request, a
