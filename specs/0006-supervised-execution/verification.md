@@ -38,3 +38,28 @@ Evidence:
 Claims: nothing is claimed Verified by this slice; no M5 milestone
 acceptance is claimed. Spec status is Accepted (2026-09-20);
 implementation (tasks T1–T8) is pending.
+
+## Slice 1 evidence — T1–T2 (2026-09-20)
+
+- New pure port `src/axiom/execute.clj`: proposal model and
+  `evaluate-proposal` (spec check order; whole-proposal deny with a
+  named reason; `:proposal/note` never read; directive-shaped
+  action fields quarantined as `:prompt-scope-escape`; malformed
+  input → `:invalid`), the task lifecycle state machine
+  (`transition-task`), and pure `project-context` (mandatory
+  blockers never droppable → `:context-budget-too-small`;
+  obligation states copied byte-identically).
+- `test/axiom/execute_test.clj` (17 deftests): named-reason denials
+  for fencing/holder/scope/capability/path-safety/class; the
+  machine-tested property "unsupported agent claims cannot turn
+  deny into admit" (denied corpus × adversarial mutations);
+  lifecycle transitions and illegal-transition rejection;
+  projection blockers-under-tiny-budget and byte-identical states.
+- `./scripts/check` unit gates on `feat/0006-execute-port`:
+  **231 tests, 2284 assertions, 0 failures, 0 errors**
+  (Temurin 17.0.20, Clojure 1.12.0). All fixtures `synth-*`; no
+  live credentials, no network.
+- Honest limits: lease records are ledger-projected fixtures here;
+  the real 0002 append path and schema v5 migration land in T3.
+  The prompt-escape scan is heuristic input quarantine, tested
+  against synthetic adversaries only (R14).

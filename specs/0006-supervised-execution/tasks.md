@@ -1,6 +1,12 @@
 # Tasks and acceptance gates
 
-- [ ] T1: Implement the pure `axiom.execute` port: the proposal
+Slice 1 (2026-09-20, PR #28): T1–T2 implemented in the pure
+`axiom.execute` port (`src/axiom/execute.clj`) with
+`test/axiom/execute_test.clj`; `./scripts/check` unit gates green
+(231 tests, 2284 assertions, 0 failures/errors on
+`feat/0006-execute-port`).
+
+- [x] T1: Implement the pure `axiom.execute` port: the proposal
   model (proposal/action/note shapes), `evaluate-proposal`
   (fencing-token check, lease-holder check, scope check,
   capability check, path-safety check, class check — in that
@@ -13,7 +19,11 @@
   fields never widens scope; the property "adding unsupported
   agent claims cannot turn deny/defer into allow" holds over
   the proposal evaluator (machine-tested).
-- [ ] T2: Implement context projection: pure
+  (Slice 1, 2026-09-20: implemented; `evaluate-proposal` runs the
+  spec check order with whole-proposal deny on the first named
+  reason; a machine-tested corpus × adversarial-mutation sweep
+  asserts denied proposals can never flip to admitted.)
+- [x] T2: Implement context projection: pure
   `project-context(task, policy, ledger-state, budget)`.
   Mandatory blockers are never droppable — a budget too small
   to hold them fails with `:context-budget-too-small`;
@@ -21,6 +31,10 @@
   Acceptance: projection under a tiny budget preserves every
   blocking obligation; obligation states are byte-identical
   before and after projection.
+  (Slice 1, 2026-09-20: implemented; `project-context` fails
+  `:context-budget-too-small` when the budget cannot hold the
+  mandatory blockers; byte-identical obligation states
+  machine-tested.)
 - [ ] T3: Ledger integration for leases and fencing:
   `:lease/acquired`, `:lease/renewed`, `:lease/released`,
   `:lease/expired`, `:lease/revoked` through the 0002 append
