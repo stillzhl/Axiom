@@ -349,30 +349,32 @@
         (finally (store/close! handle))))))
 
 ;; ------------------------------------------------------------------
-;; T3 acceptance: forward-only schema v4 migration
+;; T3 acceptance: forward-only schema v5 migration (spec 0006 adds
+;; the current_leases sidecar; the v4 assertions moved here from the
+;; 0005-era test)
 
-(deftest schema-v4-migration
-  (testing "a fresh ledger is created at v4"
+(deftest schema-v5-migration
+  (testing "a fresh ledger is created at v5"
     (with-db [path]
       (let [handle (store/open! path {:create true})]
         (try
-          (is (= 4 (:schema/version handle)))
-          (is (= ledger/supported-schema-version 4))
+          (is (= 5 (:schema/version handle)))
+          (is (= ledger/supported-schema-version 5))
           (finally (store/close! handle))))))
-  (testing "a v3 ledger migrates forward to v4 without touching payloads"
+  (testing "a v4 ledger migrates forward to v5 without touching payloads"
     (with-db [path]
       (let [handle (store/open! path {:create true})
             _ (seed-mixed-ledger! handle)
             before (mapv :payload/digest (store/read-range handle 0 3))]
         (store/close! handle)
-        ;; Simulate a v3 ledger: drop the v4 index and the version row.
+        ;; Simulate a v4 ledger: drop the v5 sidecar and the version row.
         (with-open [conn (DriverManager/getConnection (str "jdbc:sqlite:" path))]
           (with-open [stmt (.createStatement conn)]
-            (.execute stmt "DROP INDEX IF EXISTS idx_events_producer_seq")
-            (.execute stmt "UPDATE schema_version SET version=3")))
+            (.execute stmt "DROP TABLE IF EXISTS current_leases")
+            (.execute stmt "UPDATE schema_version SET version=4")))
         (let [migrated (store/open! path {:create false})]
           (try
-            (is (= 4 (:schema/version migrated)))
+            (is (= 5 (:schema/version migrated)))
             (is (= before (mapv :payload/digest (store/read-range migrated 0 3)))
                 "migration never rewrites stored payloads")
             (is (= 4 (:event/count (store/ledger-identity migrated))))

@@ -21,9 +21,10 @@
 (def bundle-version 1)
 ;; Highest ledger schema version this code understands. v1 is the base
 ;; schema; v2 adds a covering index; v3 adds the artifacts table (spec 0003);
-;; v4 adds a (producer, seq) covering index (spec 0005 T3) — see
+;; v4 adds a (producer, seq) covering index (spec 0005 T3); v5 adds the
+;; current_leases sidecar for the 0006 single-holder lease invariant — see
 ;; axiom.store migrations.
-(def supported-schema-version 4)
+(def supported-schema-version 5)
 
 (def report-limitations
   [:unauthenticated-inputs :test-evidence-is-not-proof :no-execution-authorization
@@ -264,6 +265,238 @@
   (validate-governance-event! (:governance/event payload))
   payload)
 
+;; ---------------------------------------------------------------------------
+;; Task lifecycle and lease events (spec 0006 T3)
+;;
+;; New payload kinds through the 0002 append path, additive to the
+;; existing schema: `:task` (a task lifecycle event of one of the
+;; `:task/*` kinds) and `:lease` (a lease event of one of the
+;; `:lease/*` kinds). The 0002 invariants apply unchanged:
+;; transactional sequence, hash chain, event-id/dedup-key dedup,
+;; forward-only migrations, rebuildable snapshots. The single-holder
+;; lease invariant is enforced by `axiom.store` at append time (a
+;; `current_leases` sidecar with a uniqueness constraint, maintained
+;; in the same transaction as the lease event); the pure projection
+;; of current leases over the event prefix lives in
+;; `axiom.execute/current-leases`.
+
+(def task-event-kinds
+  "The `:task/*` event kinds this slice records."
+  #{:task/accepted :task/context-prepared :task/completed :task/blocked :task/cancelled})
+
+(def lease-event-kinds
+  "The `:lease/*` event kinds this slice records."
+  #{:lease/acquired :lease/renewed :lease/released :lease/expired :lease/revoked})
+
+(def task-classes
+  "The 0006 task classes (R4): `:task-class/standard` for work outside
+   the trust-critical kernel, `:task-class/self-modifying` for changes
+   to the kernel, policies, the evaluator, or the verification
+   recipes."
+  #{:task-class/standard :task-class/self-modifying})
+
+(defn- event-shape!
+  "Validates one task/lease event map: the kind matches, every key is
+   in the allowed set, every required key is present. Returns the
+   event. Unknown or malformed events are :invalid and can never be
+   written."
+  [event kind required allowed]
+  (ensure! (map? event) "Task/lease event must be a map" {})
+  (ensure! (= kind (:event/kind event)) "Task/lease event kind mismatch"
+           {:expected kind :actual (:event/kind event)})
+  (doseq [k (keys event)]
+    (ensure! (contains? allowed k) "Unknown task/lease event field"
+             {:kind kind :field k}))
+  (doseq [k required]
+    (ensure! (contains? event k) "Missing required task/lease event field"
+             {:kind kind :field k}))
+  (doseq [t [:lease/acquired-at :lease/renewed-at :lease/released-at
+             :lease/expired-at :lease/revoked-at :task/accepted-at
+             :task/prepared-at :task/completed-at :task/blocked-at
+             :task/cancelled-at]]
+    (when (contains? event t)
+      (ensure! (non-negative-int? (get event t)) "Invalid task/lease timestamp"
+               {:field t})))
+  event)
+
+(defn- validate-task-event!
+  "Strict per-kind validation of a `:task/*` event map. Every kind
+   requires the task id and the evaluator identity that recorded the
+   event (replay reproduces which evaluator release produced each
+   recorded decision); `:task/accepted` additionally requires the
+   task class; `:task/context-prepared` requires the projected
+   context digest; `:task/blocked` may name its blockers."
+  [event]
+  (ensure! (map? event) "Task record must carry an event map" {})
+  (let [kind (:event/kind event)]
+    (ensure! (contains? task-event-kinds kind)
+             "Unknown task event kind" {:event/kind kind})
+    (case kind
+      :task/accepted
+      (do (event-shape! event kind
+                        #{:event/kind :task/id :task/class :task/evaluator}
+                        #{:event/kind :event/id :task/id :task/class
+                          :task/evaluator :task/scope-digest :task/accepted-at})
+          (ensure! (non-blank-string? (:task/id event))
+                   "Task id must be a non-blank string" {})
+          (ensure! (contains? task-classes (:task/class event))
+                   "Unknown task class" {:task/class (:task/class event)})
+          (ensure! (non-blank-string? (:task/evaluator event))
+                   "Task event requires an evaluator identity" {:kind kind})
+          (when (contains? event :task/scope-digest)
+            (ensure! (digest? (:task/scope-digest event))
+                     "Invalid task scope digest" {})))
+
+      :task/context-prepared
+      (do (event-shape! event kind
+                        #{:event/kind :task/id :task/evaluator :task/context-digest}
+                        #{:event/kind :event/id :task/id :task/evaluator
+                          :task/context-digest :task/prepared-at})
+          (ensure! (non-blank-string? (:task/id event))
+                   "Task id must be a non-blank string" {})
+          (ensure! (non-blank-string? (:task/evaluator event))
+                   "Task event requires an evaluator identity" {:kind kind})
+          (ensure! (digest? (:task/context-digest event))
+                   "Invalid task context digest" {}))
+
+      (:task/completed :task/cancelled)
+      (do (event-shape! event kind
+                        #{:event/kind :task/id :task/evaluator}
+                        #{:event/kind :event/id :task/id :task/evaluator
+                          :task/completed-at :task/cancelled-at})
+          (ensure! (non-blank-string? (:task/id event))
+                   "Task id must be a non-blank string" {})
+          (ensure! (non-blank-string? (:task/evaluator event))
+                   "Task event requires an evaluator identity" {:kind kind}))
+
+      :task/blocked
+      (do (event-shape! event kind
+                        #{:event/kind :task/id :task/evaluator}
+                        #{:event/kind :event/id :task/id :task/evaluator
+                          :task/blockers :task/blocked-at})
+          (ensure! (non-blank-string? (:task/id event))
+                   "Task id must be a non-blank string" {})
+          (ensure! (non-blank-string? (:task/evaluator event))
+                   "Task event requires an evaluator identity" {:kind kind})
+          (when (contains? event :task/blockers)
+            (ensure! (and (sequential? (:task/blockers event))
+                          (every? keyword? (:task/blockers event)))
+                     "Task blockers must be a sequence of named reasons" {})))))
+  event)
+
+(defn- validate-lease-event!
+  "Strict per-kind validation of a `:lease/*` event map. Acquire
+   requires the task, worker, fencing token, expiry and the issuing
+   evaluator identity; renewal rotates the fencing token and requires
+   the presented (current) token; release requires the presented
+   token; revocation is evaluator/authorizer-initiated and requires a
+   named reason, never a token. A token that does not match the
+   task's current lease is never applied (see `axiom.execute`)."
+  [event]
+  (ensure! (map? event) "Lease record must carry an event map" {})
+  (let [kind (:event/kind event)]
+    (ensure! (contains? lease-event-kinds kind)
+             "Unknown lease event kind" {:event/kind kind})
+    (case kind
+      :lease/acquired
+      (do (event-shape! event kind
+                        #{:event/kind :lease/task-id :lease/worker-id
+                          :lease/token :lease/expires-at :lease/issued-by}
+                        #{:event/kind :event/id :lease/task-id :lease/worker-id
+                          :lease/token :lease/expires-at :lease/issued-by
+                          :lease/acquired-at})
+          (ensure! (non-blank-string? (:lease/task-id event))
+                   "Lease task id must be a non-blank string" {})
+          (ensure! (non-blank-string? (:lease/worker-id event))
+                   "Lease worker id must be a non-blank string" {})
+          (ensure! (non-blank-string? (:lease/token event))
+                   "Lease fencing token must be a non-blank string" {})
+          (ensure! (non-negative-int? (:lease/expires-at event))
+                   "Lease expiry must be a non-negative integer" {})
+          (ensure! (non-blank-string? (:lease/issued-by event))
+                   "Lease event requires an evaluator identity" {:kind kind}))
+
+      :lease/renewed
+      (do (event-shape! event kind
+                        #{:event/kind :lease/task-id :lease/worker-id
+                          :lease/presented-token :lease/token
+                          :lease/expires-at :lease/issued-by}
+                        #{:event/kind :event/id :lease/task-id :lease/worker-id
+                          :lease/presented-token :lease/token
+                          :lease/expires-at :lease/issued-by
+                          :lease/renewed-at})
+          (ensure! (non-blank-string? (:lease/task-id event))
+                   "Lease task id must be a non-blank string" {})
+          (ensure! (non-blank-string? (:lease/worker-id event))
+                   "Lease worker id must be a non-blank string" {})
+          (ensure! (non-blank-string? (:lease/presented-token event))
+                   "Lease renewal must present the current fencing token" {})
+          (ensure! (non-blank-string? (:lease/token event))
+                   "Lease renewal must carry the rotated fencing token" {})
+          (ensure! (non-negative-int? (:lease/expires-at event))
+                   "Lease expiry must be a non-negative integer" {})
+          (ensure! (non-blank-string? (:lease/issued-by event))
+                   "Lease event requires an evaluator identity" {:kind kind}))
+
+      :lease/released
+      (do (event-shape! event kind
+                        #{:event/kind :lease/task-id :lease/worker-id
+                          :lease/presented-token :lease/issued-by}
+                        #{:event/kind :event/id :lease/task-id :lease/worker-id
+                          :lease/presented-token :lease/issued-by
+                          :lease/released-at})
+          (ensure! (non-blank-string? (:lease/task-id event))
+                   "Lease task id must be a non-blank string" {})
+          (ensure! (non-blank-string? (:lease/worker-id event))
+                   "Lease worker id must be a non-blank string" {})
+          (ensure! (non-blank-string? (:lease/presented-token event))
+                   "Lease release must present the current fencing token" {})
+          (ensure! (non-blank-string? (:lease/issued-by event))
+                   "Lease event requires an evaluator identity" {:kind kind}))
+
+      :lease/expired
+      (do (event-shape! event kind
+                        #{:event/kind :lease/task-id :lease/token :lease/issued-by}
+                        #{:event/kind :event/id :lease/task-id :lease/token
+                          :lease/issued-by :lease/expired-at})
+          (ensure! (non-blank-string? (:lease/task-id event))
+                   "Lease task id must be a non-blank string" {})
+          (ensure! (non-blank-string? (:lease/token event))
+                   "Lease fencing token must be a non-blank string" {})
+          (ensure! (non-blank-string? (:lease/issued-by event))
+                   "Lease event requires an evaluator identity" {:kind kind}))
+
+      :lease/revoked
+      (do (event-shape! event kind
+                        #{:event/kind :lease/task-id :lease/issued-by :lease/reason}
+                        #{:event/kind :event/id :lease/task-id :lease/issued-by
+                          :lease/reason :lease/revoked-at})
+          (ensure! (non-blank-string? (:lease/task-id event))
+                   "Lease task id must be a non-blank string" {})
+          (ensure! (non-blank-string? (:lease/issued-by event))
+                   "Lease event requires an evaluator identity" {:kind kind})
+          (ensure! (keyword? (:lease/reason event))
+                   "Lease revocation requires a named reason" {}))))
+  event)
+
+(defn- validate-task-record!
+  "Strict validation of a `:task` payload: the exact record shape
+   plus per-kind event validation. Unknown or malformed task events
+   are :invalid and can never be written."
+  [payload]
+  (shape! payload #{:record/kind :task/event} :task-record)
+  (validate-task-event! (:task/event payload))
+  payload)
+
+(defn- validate-lease-record!
+  "Strict validation of a `:lease` payload: the exact record shape
+   plus per-kind event validation. Unknown or malformed lease events
+   are :invalid and can never be written."
+  [payload]
+  (shape! payload #{:record/kind :lease/event} :lease-record)
+  (validate-lease-event! (:lease/event payload))
+  payload)
+
 (def ^:private gate-decisions #{:allow :deny :defer :invalid})
 (def ^:private gate-outcomes
   #{:satisfied :unknown :stale :failed :forged :violated :defer})
@@ -390,6 +623,8 @@
       :evidence-record (validate-evidence-record! payload)
       :decision/gate-evaluation (validate-gate-decision-record! payload)
       :governance (validate-governance-record! payload)
+      :task (validate-task-record! payload)
+      :lease (validate-lease-record! payload)
       (model/invalid! "Unknown record kind" {:record/kind (:record/kind payload)})))
   envelope)
 
@@ -433,6 +668,50 @@
                         :payload {:record/kind :scenario
                                   :scenario scenario
                                   :decision decision})]
+    (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope))))))
+
+(defn record-task
+  "Pure construction of the envelope to store for a task lifecycle
+   event (`:task/accepted`, `:task/context-prepared`,
+   `:task/completed`, `:task/blocked`, `:task/cancelled`). The event
+   is validated strictly per kind: the task id and the evaluator
+   identity that recorded the event are always required, so replay
+   reproduces which evaluator release produced each recorded
+   decision. The envelope's :candidate/id is the content digest of
+   the event (`axiom.model/candidate-id`): Axiom never invents an
+   identity. Returns the envelope without :seq; the store assigns
+   the sequence transactionally."
+  [prev-envelope {:keys [task-event] :as inputs}]
+  (ensure! (map? task-event) "record-task requires a task event map" {})
+  (validate-task-event! task-event)
+  (let [envelope (assoc (base-envelope prev-envelope inputs)
+                        :candidate/id (model/candidate-id task-event)
+                        :payload {:record/kind :task
+                                  :task/event task-event})]
+    (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope))))))
+
+(defn record-lease
+  "Pure construction of the envelope to store for a lease event
+   (`:lease/acquired`, `:lease/renewed`, `:lease/released`,
+   `:lease/expired`, `:lease/revoked`). The event is validated
+   strictly per kind: acquire requires task, worker, fencing token,
+   expiry and the issuing evaluator identity; renewal rotates the
+   fencing token and requires the presented token; revocation is
+   evaluator/authorizer-initiated with a named reason. The
+   single-holder invariant is enforced by `axiom.store` at append
+   time, not here: this function builds the envelope, it does not
+   decide whether the lease may be taken (see
+   `axiom.execute/acquire-lease`). The envelope's :candidate/id is
+   the content digest of the event (`axiom.model/candidate-id`).
+   Returns the envelope without :seq; the store assigns the
+   sequence transactionally."
+  [prev-envelope {:keys [lease-event] :as inputs}]
+  (ensure! (map? lease-event) "record-lease requires a lease event map" {})
+  (validate-lease-event! lease-event)
+  (let [envelope (assoc (base-envelope prev-envelope inputs)
+                        :candidate/id (model/candidate-id lease-event)
+                        :payload {:record/kind :lease
+                                  :lease/event lease-event})]
     (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope))))))
 
 (defn record-event
@@ -554,7 +833,8 @@
   (case (get-in envelope [:payload :record/kind])
     :scenario (vec (get-in envelope [:payload :scenario :events]))
     :event [(get-in envelope [:payload :event])]
-    (:observation :evidence-record :decision/gate-evaluation :governance) []
+    (:observation :evidence-record :decision/gate-evaluation :governance
+     :task :lease) []
     (operational! "Unknown record kind in stored envelope"
                   {:record/kind (get-in envelope [:payload :record/kind])})))
 

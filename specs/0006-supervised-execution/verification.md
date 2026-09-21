@@ -63,3 +63,49 @@ implementation (tasks T1–T8) is pending.
   the real 0002 append path and schema v5 migration land in T3.
   The prompt-escape scan is heuristic input quarantine, tested
   against synthetic adversaries only (R14).
+
+## Slice A evidence — T3 (2026-09-21)
+
+- `ledger/record-task` and `ledger/record-lease`: strict
+  per-kind validation of the five `:task/*` and five
+  `:lease/*` kinds (unknown kind/field/missing field →
+  `:invalid`, never writable); task kinds are additive —
+  `extract-events` shows they contribute zero 0001 world
+  events, so the 0001 fold is unchanged. The existing v4
+  migration test was updated to v5 (fresh = 5; v4 → v5 keeps
+  stored payloads byte-identical).
+- Pure `axiom.execute` lease fold: `current-leases` projection
+  plus `acquire-lease` / `renew-lease` / `release-lease` /
+  `revoke-lease` decisions and `check-fencing-token`
+  (renewal with a wrong token denied; superseded tokens
+  denied with `:stale-fencing-token`; proposals without a
+  lease denied before the fence check).
+- `axiom.store`: `current_leases` sidecar (schema v5,
+  forward-only; fresh and v1→v5 migrations tested), lease
+  events and sidecar rows written in one transaction;
+  `acquire-lease!` / `renew-lease!` / `release-lease!` /
+  `revoke-lease!` / `expire-leases!` run in `BEGIN IMMEDIATE`
+  transactions so two concurrent acquires serialize to
+  exactly one lease (the deferred-transaction
+  SHARED→RESERVED upgrade deadlocked as immediate
+  `SQLITE_BUSY`; `BEGIN IMMEDIATE` fixed it — verified by a
+  real two-thread adversarial test); `rebuild-leases!`
+  replays the event prefix and rebuilds the sidecar
+  byte-identically, proving the sidecar is a pure function
+  of the ledger.
+- New tests: `ledger_0006_test` (6 deftests), `execute_lease_test`
+  (8 deftests), `store_lease_test` (10 deftests) — 24 new deftests
+  in total, matching the 231 → 255 suite delta.
+- `./scripts/check` on `feat/0006-lease-fencing`:
+  **255 tests, 2466 assertions, 0 failures, 0 errors**
+  (Temurin 17.0.20, Clojure 1.12.0); all CLI gates green
+  (0002–0005 replays, bundles, observations, gates), no
+  network, all fixtures `synth-*`.
+- Honest limits: expiry is driven by an explicit sweep
+  (`expire-leases!`), not a background thread; the T4
+  action-outbox reconciliation has not landed yet; fencing
+  validation at the T4/T5/T6 call sites (publish, patch
+  admission, outbox moves) is enforced by those slices,
+  not yet wired here. Note the fence check is first in
+  `evaluate-proposal`'s spec order: it returns `:no-lease-held`
+  itself when no lease exists.

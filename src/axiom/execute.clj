@@ -1,5 +1,5 @@
 (ns axiom.execute
-  "Pure supervised-execution port for spec 0006 (T1, T2).
+  "Pure supervised-execution port for spec 0006 (T1, T2, T3).
 
    Inputs: a validated task record (id, class, admitted scope,
    capability grant, pinned recipe, obligations), a proposal, the
@@ -43,7 +43,8 @@
    recomputed — projection cannot change an authoritative
    decision."
   (:require [clojure.string :as str]
-            [axiom.git :as git]))
+            [axiom.git :as git]
+            [axiom.ledger :as ledger]))
 
 ;; ------------------------------------------------------------------
 ;; Shape predicates (private; malformed input -> :invalid)
@@ -69,7 +70,10 @@
     :capability/shell})
 
 (def task-classes
-  #{:task-class/standard :task-class/self-modifying})
+  "The 0006 task classes (R4). Defined in `axiom.ledger`, which
+   validates recorded task events; re-exported here for the proposal
+   evaluator's class check."
+  ledger/task-classes)
 
 (def kernel-namespaces
   "Namespace symbols forming the trust-critical kernel. Write-file
@@ -391,3 +395,198 @@
          :context/records kept
          :context/omitted-count (- (count ordered) (count kept))
          :context/budget max-records}))))
+
+;; ------------------------------------------------------------------
+;; Leases and fencing (T3)
+;;
+;; Pure lease logic over `:lease/*` event maps in ledger order. The
+;; events themselves are recorded through the 0002 append path
+;; (`axiom.ledger/record-lease`); the single-holder invariant is
+;; enforced at append time by `axiom.store` (a `current_leases`
+;; sidecar with a uniqueness constraint, maintained in the same
+;; transaction as the lease event). These functions compute the
+;; projection and the pure transition decisions; they perform no I/O.
+
+(defn- apply-lease-event
+  "Fold one `:lease/*` event into the {task-id lease-record}
+   projection. Renewal rotates the token and extends the expiry only
+   when the presented token matches the current lease — a renewal
+   citing a stale token is never applied. Release, revocation and
+   expiry clear the lease. Extra keys on the event (e.g.
+   `:lease/acquired-seq` attached by a store-side fold) are
+   preserved."
+  [leases event]
+  (let [task-id (:lease/task-id event)]
+    (case (:event/kind event)
+      :lease/acquired
+      (assoc leases task-id
+             (merge (select-keys event [:lease/task-id :lease/worker-id
+                                        :lease/token :lease/expires-at
+                                        :lease/issued-by])
+                    (select-keys event [:lease/acquired-seq])))
+
+      :lease/renewed
+      (if (= (:lease/presented-token event) (get-in leases [task-id :lease/token]))
+        (assoc leases task-id
+               (merge (get leases task-id)
+                      (select-keys event [:lease/token :lease/expires-at
+                                          :lease/issued-by])))
+        leases)
+
+      (:lease/released :lease/revoked :lease/expired)
+      (dissoc leases task-id)
+
+      leases)))
+
+(defn current-leases
+  "Pure projection of the current lease per task over a sequence of
+   `:lease/*` event maps in ledger order, at recorded time `now`.
+   A lease whose expiry is at or before `now` is absent from the
+   projection — expiry is computed from recorded time, never from a
+   wall clock the supervisor trusts. Returns {task-id lease-record}."
+  [lease-events now]
+  (let [folded (reduce apply-lease-event {} lease-events)]
+    (into {}
+          (filter (fn [[_ lease]] (< now (:lease/expires-at lease))))
+          folded)))
+
+(defn- lease-input-ok?
+  [input required]
+  (and (map? input)
+       (every? #(contains? input %) required)
+       (non-blank-string? (:lease/task-id input))
+       (non-blank-string? (:lease/worker-id input))
+       (non-blank-string? (:lease/token input))
+       (integer? (:lease/expires-at input))
+       (not (neg? (:lease/expires-at input)))
+       (non-blank-string? (:lease/issued-by input))))
+
+(defn acquire-lease
+  "Pure acquire decision over the current-leases projection.
+   Returns `{:lease/ok true, :lease/event <the :lease/acquired event
+   map>}` when the task holds no live lease, or `{:lease/ok false,
+   :lease/reason :task-already-leased}` when it does. Malformed input
+   yields `:malformed` and can never produce an event."
+  [leases input]
+  (cond
+    (or (not (map? leases))
+        (not (lease-input-ok? input [:lease/task-id :lease/worker-id
+                                     :lease/token :lease/expires-at
+                                     :lease/issued-by])))
+    {:lease/ok false :lease/reason :malformed}
+
+    (contains? leases (:lease/task-id input))
+    {:lease/ok false :lease/reason :task-already-leased}
+
+    :else
+    {:lease/ok true
+     :lease/event {:event/kind :lease/acquired
+                   :lease/task-id (:lease/task-id input)
+                   :lease/worker-id (:lease/worker-id input)
+                   :lease/token (:lease/token input)
+                   :lease/expires-at (:lease/expires-at input)
+                   :lease/issued-by (:lease/issued-by input)}}))
+
+(defn renew-lease
+  "Pure renewal decision. The presented token must match the task's
+   current lease; renewal rotates the fencing token (the event
+   carries both the presented and the new token) and extends the
+   expiry. A wrong token is denied with `:stale-fencing-token` and
+   the attempt is never applied — the denial is returned, not
+   recorded."
+  [leases input]
+  (let [task-id (:lease/task-id input)
+        current (get leases task-id)]
+    (cond
+      (or (not (map? leases)) (not (map? input))
+          (not (non-blank-string? task-id))
+          (not (non-blank-string? (:lease/presented-token input)))
+          (not (non-blank-string? (:lease/token input)))
+          (not (integer? (:lease/expires-at input)))
+          (not (non-blank-string? (:lease/issued-by input))))
+      {:lease/ok false :lease/reason :malformed}
+
+      (nil? current)
+      {:lease/ok false :lease/reason :no-lease-held}
+
+      (not= (:lease/presented-token input) (:lease/token current))
+      {:lease/ok false :lease/reason :stale-fencing-token}
+
+      :else
+      {:lease/ok true
+       :lease/event {:event/kind :lease/renewed
+                     :lease/task-id task-id
+                     :lease/worker-id (:lease/worker-id current)
+                     :lease/presented-token (:lease/presented-token input)
+                     :lease/token (:lease/token input)
+                     :lease/expires-at (:lease/expires-at input)
+                     :lease/issued-by (:lease/issued-by input)}})))
+
+(defn release-lease
+  "Pure release decision. The worker presents its current fencing
+   token; a mismatch is denied with `:stale-fencing-token`."
+  [leases input]
+  (let [task-id (:lease/task-id input)
+        current (get leases task-id)]
+    (cond
+      (or (not (map? leases)) (not (map? input))
+          (not (non-blank-string? task-id))
+          (not (non-blank-string? (:lease/presented-token input)))
+          (not (non-blank-string? (:lease/issued-by input))))
+      {:lease/ok false :lease/reason :malformed}
+
+      (nil? current)
+      {:lease/ok false :lease/reason :no-lease-held}
+
+      (not= (:lease/presented-token input) (:lease/token current))
+      {:lease/ok false :lease/reason :stale-fencing-token}
+
+      :else
+      {:lease/ok true
+       :lease/event {:event/kind :lease/released
+                     :lease/task-id task-id
+                     :lease/worker-id (:lease/worker-id current)
+                     :lease/presented-token (:lease/presented-token input)
+                     :lease/issued-by (:lease/issued-by input)}})))
+
+(defn revoke-lease
+  "Pure revocation decision. Revocation is evaluator/authorizer-
+   initiated (the 0006 authorization model): it requires the issuing
+   identity and a named reason, never a fencing token. Takes effect
+   on the next record read — in-flight worker actions are fenced at
+   the supervisor, which checks token currency before executing
+   anything."
+  [leases input]
+  (let [task-id (:lease/task-id input)
+        current (get leases task-id)]
+    (cond
+      (or (not (map? leases)) (not (map? input))
+          (not (non-blank-string? task-id))
+          (not (non-blank-string? (:lease/issued-by input)))
+          (not (keyword? (:lease/reason input))))
+      {:lease/ok false :lease/reason :malformed}
+
+      (nil? current)
+      {:lease/ok false :lease/reason :no-lease-held}
+
+      :else
+      {:lease/ok true
+       :lease/event {:event/kind :lease/revoked
+                     :lease/task-id task-id
+                     :lease/issued-by (:lease/issued-by input)
+                     :lease/reason (:lease/reason input)}})))
+
+(defn check-fencing-token
+  "Pure fencing check over the current-leases projection: nil when
+   the presented token matches the task's current lease,
+   `:no-lease-held` when the task holds no live lease, and
+   `:stale-fencing-token` on mismatch. Every worker-submitted
+   record (proposal, action result, evidence claim) is gated on
+   this: a stale worker cannot publish, admit patches, or move
+   outbox intents."
+  [leases task-id token]
+  (let [current (get leases task-id)]
+    (cond
+      (nil? current) :no-lease-held
+      (not= token (:lease/token current)) :stale-fencing-token
+      :else nil)))

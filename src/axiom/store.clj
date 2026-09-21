@@ -1,10 +1,12 @@
 (ns axiom.store
-  "SQLite adapter for the durable ledger (specs 0002, 0003, 0005 T3). This is the only
+  "SQLite adapter for the durable ledger (specs 0002, 0003, 0005 T3, 0006 T3). This is the only
    namespace that touches the database file. All chain logic, validation
-   and reduction live in the pure axiom.ledger port; this namespace only
-   maps envelopes, snapshots and artifact rows to tables, runs
+   and reduction live in the pure axiom.ledger port; lease transition
+   decisions live in the pure axiom.execute port; this namespace only
+   maps envelopes, snapshots, artifact and lease rows to tables, runs
    transactions and applies numbered forward-only migrations."
   (:require [axiom.contract :as contract]
+            [axiom.execute :as execute]
             [axiom.ledger :as ledger]
             [axiom.model :as model]
             [clojure.string :as str])
@@ -51,7 +53,23 @@
    ;; Spec 0005 T3: covering index for producer-ordered scans (gate
    ;; decision / governance audit queries). Additive only; never
    ;; rewrites stored event payloads.
-   4 ["CREATE INDEX IF NOT EXISTS idx_events_producer_seq ON events(producer, seq)"]})
+   4 ["CREATE INDEX IF NOT EXISTS idx_events_producer_seq ON events(producer, seq)"]
+   ;; Spec 0006 T3: materialized current-lease projection. The events
+   ;; table remains the source of truth; this sidecar exists so the
+   ;; single-holder lease invariant is enforced by a uniqueness
+   ;; constraint inside the same transaction that appends the lease
+   ;; event — two concurrent acquires serialize to exactly one
+   ;; success. The sidecar is a pure function of the event prefix
+   ;; (see rebuild-leases!); replay-equivalence of the ledger is
+   ;; unaffected. Additive only; never rewrites stored event
+   ;; payloads.
+   5 ["CREATE TABLE IF NOT EXISTS current_leases (
+        task_id TEXT PRIMARY KEY,
+        worker_id TEXT NOT NULL,
+        token TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        issued_by TEXT NOT NULL,
+        acquired_seq INTEGER NOT NULL)"]})
 
 (defn- operational! [message data]
   (ledger/operational! message data))
@@ -59,7 +77,14 @@
 (defn- ^Connection connect! [path]
   (try
     (Class/forName "org.sqlite.JDBC")
-    (DriverManager/getConnection (str "jdbc:sqlite:" path))
+    (let [^Connection conn (DriverManager/getConnection (str "jdbc:sqlite:" path))]
+      ;; Concurrent lease acquirers must serialize on the write lock
+      ;; rather than fail fast: a bounded busy timeout turns lock
+      ;; contention into waiting, so two concurrent acquires resolve
+      ;; to exactly one success via the uniqueness constraint.
+      (with-open [stmt (.createStatement conn)]
+        (.execute stmt "PRAGMA busy_timeout=5000"))
+      conn)
     (catch Exception e
       (operational! "Cannot open ledger database" {:path path :cause (str e)}))))
 
@@ -87,6 +112,28 @@
         (try (.rollback conn) (catch Exception _))
         (throw e))
       (finally (.setAutoCommit conn prev)))))
+
+(defn- with-immediate-tx
+  "Runs f in a `BEGIN IMMEDIATE` transaction: the RESERVED write
+   lock is taken up front, before any read. A concurrent writer
+   blocks on the lock (bounded by the connection's busy_timeout)
+   instead of deadlocking on a SHARED->RESERVED upgrade, which
+   SQLite reports as an immediate SQLITE_BUSY that the busy
+   handler cannot smooth over. Used by the lease operations, whose
+   read-check-then-write shape races under concurrency."
+  [^Connection conn f]
+  (with-open [begin (.createStatement conn)]
+    (.execute begin "BEGIN IMMEDIATE"))
+  (try
+    (let [result (f)]
+      (with-open [commit (.createStatement conn)]
+        (.execute commit "COMMIT"))
+      result)
+    (catch Exception e
+      (try (with-open [rb (.createStatement conn)]
+             (.execute rb "ROLLBACK"))
+           (catch Exception _))
+      (throw e))))
 
 (defn- table-exists? [^Connection conn table]
   (boolean (:name (query-one conn "SELECT name FROM sqlite_master WHERE type='table' AND name=?" [table]))))
@@ -212,6 +259,31 @@
           (re-find #"UNIQUE constraint failed: events\.dedup_key" message) :duplicate-dedup-key
           :else nil)))
 
+(defn- append-in-tx!
+  "Appends a validated envelope inside an ambient transaction,
+   assigning the next sequence number. The envelope's :prev/hash must
+   match the current head (stale writes are rejected). Duplicate
+   event IDs and duplicate deduplication keys are rejected
+   deterministically. Returns the stored envelope with :seq."
+  [^Connection conn envelope]
+  (let [head (query-one conn
+                        (str "SELECT " envelope-columns " FROM events ORDER BY seq DESC LIMIT 1") [])
+        head-env (when head (row->envelope head))
+        expected-prev (if head-env (ledger/chain-digest head-env) "")]
+    (when (not= expected-prev (:prev/hash envelope))
+      (model/invalid! "Envelope prev-hash does not match ledger head"
+                      {:expected expected-prev :actual (:prev/hash envelope)}))
+    (let [seq (if head-env (inc (int (:seq head-env))) 0)]
+      (try
+        (insert-envelope! conn seq envelope)
+        (catch SQLException e
+          (if-let [reason (duplicate-reason e)]
+            (throw (ex-info "Duplicate ledger append rejected"
+                            {:axiom/error :duplicate :reason reason
+                             :event/id (:event/id envelope)}))
+            (throw e))))
+      (assoc envelope :seq seq))))
+
 (defn append!
   "Appends a validated envelope, assigning the next sequence number inside
    a single transaction. The envelope's :prev/hash must match the current
@@ -222,25 +294,7 @@
   (ledger/validate-envelope! envelope)
   (let [^Connection conn (:connection handle)]
     (try
-      (with-tx conn
-        (fn []
-          (let [head (query-one conn
-                       (str "SELECT " envelope-columns " FROM events ORDER BY seq DESC LIMIT 1") [])
-                head-env (when head (row->envelope head))
-                expected-prev (if head-env (ledger/chain-digest head-env) "")]
-            (when (not= expected-prev (:prev/hash envelope))
-              (model/invalid! "Envelope prev-hash does not match ledger head"
-                              {:expected expected-prev :actual (:prev/hash envelope)}))
-            (let [seq (if head-env (inc (int (:seq head-env))) 0)]
-              (try
-                (insert-envelope! conn seq envelope)
-                (catch SQLException e
-                  (if-let [reason (duplicate-reason e)]
-                    (throw (ex-info "Duplicate ledger append rejected"
-                                    {:axiom/error :duplicate :reason reason
-                                     :event/id (:event/id envelope)}))
-                    (throw e))))
-              (assoc envelope :seq seq)))))
+      (with-tx conn (fn [] (append-in-tx! conn envelope)))
       (catch clojure.lang.ExceptionInfo e (throw e))
       (catch SQLException e
         (operational! "Ledger append failed" {:cause (str e)})))))
@@ -631,3 +685,318 @@
                         [(str "SELECT " artifact-columns " FROM artifacts ORDER BY digest")
                          []])]
      (mapv row->artifact (query-all conn sql params)))))
+
+;; ------------------------------------------------------------------
+;; Leases (spec 0006 T3)
+;;
+;; Transactional lease operations over the `:lease/*` event kinds.
+;; The events table is the source of truth; `current_leases` is a
+;; materialized projection maintained in the same transaction as
+;; each lease event append, with a uniqueness constraint on
+;; task_id enforcing the single-holder invariant. Two concurrent
+;; acquires serialize on the write lock (bounded busy_timeout, see
+;; connect!): the loser hits the uniqueness constraint and is
+;; denied with :task-already-leased — never a second lease.
+;;
+;; Every function takes `now` — the supervisor's recorded time, an
+;; integer — because expiry is computed from recorded time, never
+;; from a trusted wall clock. Pure transition decisions come from
+;; `axiom.execute`; this namespace only runs them inside
+;; transactions and maps rows.
+
+(defn- head-envelope-in-tx [^Connection conn]
+  (let [head (query-one conn
+                        (str "SELECT " envelope-columns " FROM events ORDER BY seq DESC LIMIT 1") [])]
+    (when head (row->envelope head))))
+
+(defn- lease-row->lease [row]
+  {:lease/task-id (:task_id row)
+   :lease/worker-id (:worker_id row)
+   :lease/token (:token row)
+   :lease/expires-at (long (:expires_at row))
+   :lease/issued-by (:issued_by row)
+   :lease/acquired-seq (long (:acquired_seq row))})
+
+(defn- read-current-leases
+  "Reads the current_leases sidecar inside an ambient transaction,
+   expiry-filtered at `now`. Returns {task-id lease-record}."
+  [^Connection conn now]
+  (let [rows (query-all conn
+                        (str "SELECT task_id, worker_id, token, expires_at, issued_by, acquired_seq"
+                             " FROM current_leases")
+                        [])]
+    (into {}
+          (comp (map lease-row->lease)
+                (filter (fn [lease] (< now (:lease/expires-at lease))))
+                (map (fn [lease] [(:lease/task-id lease) lease])))
+          rows)))
+
+(defn current-leases
+  "The live current-lease projection from the sidecar,
+   expiry-filtered at recorded time `now`. Read-only."
+  [handle now]
+  (read-current-leases (:connection handle) now))
+
+(defn current-lease
+  "The live lease for one task at recorded time `now`, or nil.
+   Read-only."
+  [handle task-id now]
+  (get (current-leases handle now) task-id))
+
+(defn- insert-lease-row! [^Connection conn lease]
+  (with-open [stmt (.prepareStatement conn
+                                      (str "INSERT INTO current_leases"
+                                           " (task_id, worker_id, token, expires_at, issued_by, acquired_seq)"
+                                           " VALUES (?,?,?,?,?,?)"))]
+    (.setString ^PreparedStatement stmt 1 (:lease/task-id lease))
+    (.setString ^PreparedStatement stmt 2 (:lease/worker-id lease))
+    (.setString ^PreparedStatement stmt 3 (:lease/token lease))
+    (.setLong ^PreparedStatement stmt 4 (long (:lease/expires-at lease)))
+    (.setString ^PreparedStatement stmt 5 (:lease/issued-by lease))
+    (.setLong ^PreparedStatement stmt 6 (long (:lease/acquired-seq lease)))
+    (.executeUpdate stmt)))
+
+(defn- update-lease-row! [^Connection conn task-id token expires-at issued-by]
+  (with-open [stmt (.prepareStatement conn
+                                      (str "UPDATE current_leases"
+                                           " SET token=?, expires_at=?, issued_by=?"
+                                           " WHERE task_id=?"))]
+    (.setString ^PreparedStatement stmt 1 token)
+    (.setLong ^PreparedStatement stmt 2 (long expires-at))
+    (.setString ^PreparedStatement stmt 3 issued-by)
+    (.setString ^PreparedStatement stmt 4 task-id)
+    (.executeUpdate stmt)))
+
+(defn- delete-lease-row! [^Connection conn task-id]
+  (with-open [stmt (.prepareStatement conn
+                                      "DELETE FROM current_leases WHERE task_id=?")]
+    (.setString ^PreparedStatement stmt 1 task-id)
+    (.executeUpdate stmt)))
+
+(defn- default-dedup-key [event]
+  (str "lease/" (name (:event/kind event)) "/"
+       (:lease/task-id event) "/"
+       (or (:lease/token event) (:lease/presented-token event) "none")))
+
+(defn- lease-envelope-inputs
+  "Builds the `ledger/record-lease` inputs from the decided lease
+   event and the caller's envelope overrides. `:record/producer`,
+   `:record/observed-time` and `:record/ingested-time` are required;
+   the event id, stream id and dedup key default deterministically
+   from the event — the dedup key makes a crash-retry of the same
+   attempt idempotent instead of a second lease."
+  [lease-event input]
+  (let [task-id (:lease/task-id lease-event)]
+    {:event/id (or (:record/event-id input)
+                   (str "lease-event/" task-id "/"
+                        (name (:event/kind lease-event)) "/"
+                        (or (:lease/token lease-event)
+                            (:lease/presented-token lease-event))))
+     :stream/id (or (:record/stream-id input) (str "task-stream/" task-id))
+     :dedup/key (or (:record/dedup-key input) (default-dedup-key lease-event))
+     :producer (:record/producer input)
+     :observed/time (:record/observed-time input)
+     :ingested/time (:record/ingested-time input)
+     :lease-event lease-event}))
+
+(defn- unique-lease-violation? [^SQLException e]
+  (boolean (re-find #"UNIQUE constraint failed: current_leases\.task_id"
+                    (str (.getMessage e)))))
+
+(defn acquire-lease!
+  "Transactional lease acquire. In one transaction: decides via
+   `axiom.execute/acquire-lease` against the in-transaction
+   sidecar, installs the sidecar row, and appends the
+   `:lease/acquired` event through the 0002 path (transactional
+   sequence, hash chain, dedup).
+
+   Returns `{:lease/ok true, :lease/lease <lease-record>,
+   :lease/seq <event seq>}`. A live lease on the task denies with
+   `{:lease/ok false, :lease/reason :task-already-leased}` —
+   including the concurrent-acquire loser, via the uniqueness
+   constraint. A retry of the same attempt (same task and token)
+   returns the live lease with `:lease/duplicate? true` instead of
+   a second lease. Malformed input returns `{:lease/ok false,
+   :lease/reason :malformed}` and nothing is appended.
+
+   `input` carries the `:lease/*` fields
+   (`:lease/task-id`, `:lease/worker-id`, `:lease/token`,
+   `:lease/expires-at`, `:lease/issued-by`) plus the `:record/*`
+   envelope overrides (`:record/producer`,
+   `:record/observed-time`, `:record/ingested-time` required;
+   `:record/event-id`, `:record/stream-id`, `:record/dedup-key`
+   optional). `now` is the supervisor's recorded time."
+  [handle input now]
+  (let [^Connection conn (:connection handle)]
+    (try
+      (with-immediate-tx conn
+        (fn []
+          (let [live (read-current-leases conn now)
+                task-id (:lease/task-id input)
+                existing (get live task-id)]
+            (cond
+              ;; Idempotent crash-retry: the same attempt already
+              ;; holds the lease — return it, never a second lease.
+              (and existing (= (:lease/token existing) (:lease/token input)))
+              {:lease/ok true :lease/duplicate? true :lease/lease existing}
+
+              :else
+              (let [decision (execute/acquire-lease live input)]
+                (if (not (:lease/ok decision))
+                  decision
+                  (let [event (:lease/event decision)
+                        envelope (ledger/record-lease (head-envelope-in-tx conn)
+                                                      (lease-envelope-inputs event input))
+                        ;; Clear any stale (expired) row first; a live
+                        ;; row would have denied above. The uniqueness
+                        ;; constraint then admits exactly one
+                        ;; concurrent acquirer.
+                        _ (delete-lease-row! conn task-id)
+                        stored (append-in-tx! conn envelope)
+                        lease {:lease/task-id (:lease/task-id event)
+                               :lease/worker-id (:lease/worker-id event)
+                               :lease/token (:lease/token event)
+                               :lease/expires-at (:lease/expires-at event)
+                               :lease/issued-by (:lease/issued-by event)
+                               :lease/acquired-seq (:seq stored)}]
+                    (insert-lease-row! conn lease)
+                    {:lease/ok true :lease/lease lease
+                     :lease/seq (:seq stored)})))))))
+      (catch SQLException e
+        (if (unique-lease-violation? e)
+          {:lease/ok false :lease/reason :task-already-leased}
+          (throw e)))
+      (catch clojure.lang.ExceptionInfo e
+        (if (= :duplicate (:axiom/error (ex-data e)))
+          ;; Backstop: the dedup key shows this exact attempt was
+          ;; already recorded. Return the live lease — never a
+          ;; second one.
+          (let [lease (current-lease handle (:lease/task-id input) now)]
+            {:lease/ok true :lease/duplicate? true :lease/lease lease})
+          (throw e))))))
+
+(defn renew-lease!
+  "Transactional lease renewal. The presented token must match the
+   task's current lease; renewal rotates the fencing token and
+   extends the expiry. A wrong token is denied with
+   `:stale-fencing-token` and nothing is appended. `input` carries
+   `:lease/task-id`, `:lease/presented-token`, `:lease/token` (the
+   new token), `:lease/expires-at`, `:lease/issued-by`, plus the
+   `:record/*` envelope overrides."
+  [handle input now]
+  (let [^Connection conn (:connection handle)]
+    (with-immediate-tx conn
+      (fn []
+        (let [live (read-current-leases conn now)
+              decision (execute/renew-lease live input)]
+          (if (not (:lease/ok decision))
+            decision
+            (let [event (:lease/event decision)
+                  envelope (ledger/record-lease (head-envelope-in-tx conn)
+                                                (lease-envelope-inputs event input))
+                  stored (append-in-tx! conn envelope)
+                  task-id (:lease/task-id event)]
+              (update-lease-row! conn task-id (:lease/token event)
+                                 (:lease/expires-at event)
+                                 (:lease/issued-by event))
+              {:lease/ok true
+               :lease/lease (assoc (get live task-id)
+                                   :lease/token (:lease/token event)
+                                   :lease/expires-at (:lease/expires-at event)
+                                   :lease/issued-by (:lease/issued-by event))
+               :lease/seq (:seq stored)})))))))
+
+(defn release-lease!
+  "Transactional lease release. The worker presents its current
+   fencing token; a mismatch is denied with `:stale-fencing-token`
+   and nothing is appended. `input` carries `:lease/task-id`,
+   `:lease/presented-token`, plus the `:record/*` envelope
+   overrides (`:lease/issued-by` defaults to `:record/producer`)."
+  [handle input now]
+  (let [^Connection conn (:connection handle)]
+    (with-immediate-tx conn
+      (fn []
+        (let [live (read-current-leases conn now)
+              full-input (update input :lease/issued-by
+                                 #(or % (:record/producer input)))
+              decision (execute/release-lease live full-input)]
+          (if (not (:lease/ok decision))
+            decision
+            (let [event (:lease/event decision)
+                  envelope (ledger/record-lease (head-envelope-in-tx conn)
+                                                (lease-envelope-inputs event full-input))
+                  stored (append-in-tx! conn envelope)]
+              (delete-lease-row! conn (:lease/task-id event))
+              {:lease/ok true :lease/seq (:seq stored)})))))))
+
+(defn revoke-lease!
+  "Transactional lease revocation. Evaluator/authorizer-initiated:
+   requires the issuing identity and a named reason, never a
+   fencing token. `input` carries `:lease/task-id`,
+   `:lease/issued-by`, `:lease/reason`, plus the `:record/*`
+   envelope overrides."
+  [handle input now]
+  (let [^Connection conn (:connection handle)]
+    (with-immediate-tx conn
+      (fn []
+        (let [live (read-current-leases conn now)
+              decision (execute/revoke-lease live input)]
+          (if (not (:lease/ok decision))
+            decision
+            (let [event (:lease/event decision)
+                  envelope (ledger/record-lease (head-envelope-in-tx conn)
+                                                (lease-envelope-inputs event input))
+                  stored (append-in-tx! conn envelope)]
+              (delete-lease-row! conn (:lease/task-id event))
+              {:lease/ok true :lease/seq (:seq stored)})))))))
+
+(defn expire-leases!
+  "Appends `:lease/expired` events for sidecar rows whose expiry is
+   at or before `now`, clearing the rows, all in one transaction.
+   `input` supplies the `:record/*` envelope overrides shared by
+   the expiry events (`:lease/issued-by` defaults to
+   `:record/producer`). Returns the vector of expired task ids."
+  [handle input now]
+  (let [^Connection conn (:connection handle)]
+    (with-immediate-tx conn
+      (fn []
+        (let [rows (query-all conn
+                              (str "SELECT task_id, worker_id, token, expires_at, issued_by, acquired_seq"
+                                   " FROM current_leases WHERE expires_at <= ?")
+                              [now])
+              issued-by (or (:lease/issued-by input) (:record/producer input))]
+          (mapv (fn [row]
+                  (let [lease (lease-row->lease row)
+                        task-id (:lease/task-id lease)
+                        event {:event/kind :lease/expired
+                               :lease/task-id task-id
+                               :lease/token (:lease/token lease)
+                               :lease/issued-by issued-by}
+                        envelope (ledger/record-lease (head-envelope-in-tx conn)
+                                                      (lease-envelope-inputs event input))]
+                    (delete-lease-row! conn task-id)
+                    (append-in-tx! conn envelope)
+                    task-id))
+                rows))))))
+
+(defn rebuild-leases!
+  "Rebuilds the current_leases sidecar from the events table. The
+   sidecar is a pure function of the event prefix, so truncating
+   and re-folding must reproduce it exactly — this proves the
+   projection's replay-equivalence. Returns the rebuilt
+   {task-id lease} map."
+  [handle now]
+  (let [^Connection conn (:connection handle)
+        envs (read-range handle 0 Long/MAX_VALUE)]
+    (with-immediate-tx conn
+      (fn []
+        (exec! conn "DELETE FROM current_leases")
+        (let [events (map (fn [env]
+                            (assoc (get-in env [:payload :lease/event])
+                                   :lease/acquired-seq (:seq env)))
+                          (filter #(= :lease (get-in % [:payload :record/kind]))
+                                  envs))
+              rebuilt (execute/current-leases events now)]
+          (doseq [[_ lease] rebuilt]
+            (insert-lease-row! conn lease))
+          rebuilt)))))

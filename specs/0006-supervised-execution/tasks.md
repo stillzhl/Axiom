@@ -35,7 +35,7 @@ Slice 1 (2026-09-20, PR #28): T1–T2 implemented in the pure
   `:context-budget-too-small` when the budget cannot hold the
   mandatory blockers; byte-identical obligation states
   machine-tested.)
-- [ ] T3: Ledger integration for leases and fencing:
+- [x] T3: Ledger integration for leases and fencing:
   `:lease/acquired`, `:lease/renewed`, `:lease/released`,
   `:lease/expired`, `:lease/revoked` through the 0002 append
   path (transactional single-holder invariant), the current-
@@ -46,6 +46,18 @@ Slice 1 (2026-09-20, PR #28): T1–T2 implemented in the pure
   is denied; any worker record with a superseded token is
   denied with `:stale-fencing-token`; stale workers cannot
   publish, admit patches, or move outbox intents.
+  (Slice A, 2026-09-21: implemented — `ledger/record-task` /
+  `record-lease` with strict per-kind validation, additive
+  `:task`/`:lease` record kinds (the 0001 world fold is unchanged:
+  they contribute zero 0001 events), pure
+  `execute/current-leases` projection plus acquire/renew/release/
+  revoke decisions and `check-fencing-token`, `store`
+  transactional lease operations over a `current_leases` sidecar
+  with a uniqueness constraint (schema v5, forward-only),
+  `BEGIN IMMEDIATE` so two concurrent acquires serialize to
+  exactly one lease, `rebuild-leases!` proving the sidecar is a
+  pure function of the event prefix; same-token crash-retry of an
+  acquire is idempotent.)
 - [ ] T4: Implement the action outbox (the 0002-deferred item):
   intent records with idempotency keys, supervisor-only
   transitions (`:intent-recorded → :executing → :executed |
