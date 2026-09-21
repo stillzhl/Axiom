@@ -64,11 +64,11 @@
 
 (def capability-set
   "The closed capability set. Requests for anything outside it are
-   rejected as `:unknown-capability`, never passed through."
-  #{:capability/read-file
-    :capability/write-file
-    :capability/run-tests
-    :capability/shell})
+   rejected as `:unknown-capability`, never passed through.
+   Canonical definition lives in `axiom.ledger` (it validates the
+   grant on the recorded task); re-exported here for the proposal
+   evaluator."
+  ledger/capability-set)
 
 (def task-classes
   "The 0006 task classes (R4). Defined in `axiom.ledger`, which

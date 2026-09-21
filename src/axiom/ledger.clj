@@ -295,6 +295,35 @@
    recipes."
   #{:task-class/standard :task-class/self-modifying})
 
+(def capability-set
+  "The closed capability set (R5). The grant on the task record may
+   only name these; requests for anything outside it are rejected as
+   `:unknown-capability`, never passed through."
+  #{:capability/read-file
+    :capability/write-file
+    :capability/run-tests
+    :capability/shell})
+
+(defn- valid-capability-grant?
+  "Strict shape of the capability grant on the task record (R5, T5):
+   a map keyed by the closed capability set; `:capability/read-file`,
+   `:capability/run-tests` and `:capability/shell` are booleans
+   (shell defaults to deny — it must be explicitly true);
+   `:capability/write-file` is a non-empty set of path-prefix
+   strings. Set by the supervisor at task admission, never by the
+   worker."
+  [grant]
+  (and (map? grant)
+       (every? #(contains? capability-set %) (keys grant))
+       (every? (fn [[k v]]
+                 (case k
+                   :capability/write-file
+                   (and (set? v) (seq v) (every? non-blank-string? v))
+                   (:capability/read-file :capability/run-tests :capability/shell)
+                   (boolean? v)
+                   false))
+               grant)))
+
 (defn- event-shape!
   "Validates one task/lease event map: the kind matches, every key is
    in the allowed set, every required key is present. Returns the
@@ -337,7 +366,8 @@
       (do (event-shape! event kind
                         #{:event/kind :task/id :task/class :task/evaluator}
                         #{:event/kind :event/id :task/id :task/class
-                          :task/evaluator :task/scope-digest :task/accepted-at})
+                          :task/evaluator :task/scope-digest :task/accepted-at
+                          :task/capabilities})
           (ensure! (non-blank-string? (:task/id event))
                    "Task id must be a non-blank string" {})
           (ensure! (contains? task-classes (:task/class event))
@@ -346,7 +376,10 @@
                    "Task event requires an evaluator identity" {:kind kind})
           (when (contains? event :task/scope-digest)
             (ensure! (digest? (:task/scope-digest event))
-                     "Invalid task scope digest" {})))
+                     "Invalid task scope digest" {}))
+          (when (contains? event :task/capabilities)
+            (ensure! (valid-capability-grant? (:task/capabilities event))
+                     "Invalid capability grant on the task record" {})))
 
       :task/context-prepared
       (do (event-shape! event kind
