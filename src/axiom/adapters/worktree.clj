@@ -180,10 +180,11 @@
 ;; (symlinks are denied at admission with :path-safety-violation).
 
 (defn- list-files
-  "Map of repo-relative path -> {:digest <sha256:...> | nil,
+  "Map of repo-relative path -> {:digest <sha256:...>,
    :symlink? bool} for every file under `root`. Directories are
-   not listed; symlinks are recorded with :symlink? true and no
-   digest (their target is never followed)."
+   not listed; symlinks are recorded with :symlink? true and a
+   digest of their link target (read via `readSymbolicLink`,
+   which never follows the link)."
   [^Path root]
   (let [acc (java.util.HashMap.)]
     (Files/walkFileTree
@@ -193,7 +194,10 @@
          (let [rel (str (.relativize root ^Path file))
                symlink? (Files/isSymbolicLink ^Path file)]
            (.put acc rel
-                  {:digest (when-not symlink?
+                  {:digest (if symlink?
+                             (model/sha256-bytes
+                              (.getBytes (str (Files/readSymbolicLink ^Path file))
+                                         "UTF-8"))
                              (model/sha256-bytes (Files/readAllBytes ^Path file)))
                     :symlink? (boolean symlink?)}))
          FileVisitResult/CONTINUE)))
@@ -204,9 +208,10 @@
    `{:worktree/ok true, :diff/operations [...]}` where each
    operation is `{:diff/path, :diff/op :add|:modify|:delete,
    :diff/digest <sha256:...>, :diff/symlink? bool}` — the digest
-   of a deleted path is the base digest; a symlink never gets a
-   digest. Malformed input yields `:malformed`; a missing base
-   yields `:base-unavailable`. The base is read, never written."
+   of a deleted path is the base digest; a symlink's digest is
+   the digest of its link target. Malformed input yields
+   `:malformed`; a missing base yields `:base-unavailable`. The
+   base is read, never written."
   [{:worktree/keys [path] :as _worktree} base-dir]
   (cond
     (not (and (non-blank-string? path) (non-blank-string? base-dir)))

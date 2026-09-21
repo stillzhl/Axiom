@@ -213,7 +213,8 @@
                 op (some #(when (= "docs/link.md" (:diff/path %)) %)
                          (:diff/operations res))]
             (is (true? (:diff/symlink? op)))
-            (is (nil? (:diff/digest op))))))
+            (is (re-matches #"sha256:[0-9a-f]{64}" (:diff/digest op))
+                "a symlink carries the digest of its link target (never followed)"))))
       (testing "malformed input and a missing base are refused"
         (is (= :malformed (:worktree/reason
                            (worktree/diff-worktree {} (str base)))))
@@ -226,3 +227,93 @@
           (worktree/destroy-worktree {:worktree/id (.getName d)
                                       :worktree/path (str d)
                                       :worktree/root (str (.getParentFile d))}))))))
+
+;; ------------------------------------------------------------------
+;; T6 corrections
+
+(deftest admit-patch-denies-adapter-symlink-with-path-safety-violation
+  (testing "a symlink produced by diff-worktree carries a digest and is denied
+            with :path-safety-violation (not :invalid/:malformed)"
+    (let [base (.toFile (Files/createTempDirectory "axiom-patch-base"
+                                                   (into-array FileAttribute [])))
+          wt (.toFile (Files/createTempDirectory "axiom-patch-wt"
+                                                 (into-array FileAttribute [])))]
+      (try
+        ;; base and worktree both contain docs/guide.md
+        (doseq [root [base wt]]
+          (let [f (File. ^File root "docs/guide.md")]
+            (.mkdirs (.getParentFile f))
+            (spit f "guide")))
+        ;; worktree gains a symlink
+        (Files/createSymbolicLink
+         (.toPath (File. ^File wt "docs/link.md"))
+         (.toPath (File. ^File wt "docs/guide.md"))
+         (into-array FileAttribute []))
+        (let [worktree {:worktree/id "wt-synth" :worktree/path (str wt)
+                        :worktree/root (str (.getParentFile wt))}
+              diff-res (worktree/diff-worktree worktree (str base))
+              operations (:diff/operations diff-res)
+              link-op (first (filter #(= "docs/link.md" (:diff/path %)) operations))]
+          (is (true? (:worktree/ok diff-res)))
+          (is (some? link-op) "the symlink is in the diff")
+          (is (true? (:diff/symlink? link-op)))
+          (is (re-matches #"sha256:[0-9a-f]{64}" (:diff/digest link-op))
+              "the symlink carries a digest of its link target")
+          (let [res (admit [(assoc link-op :diff/digest (:diff/digest link-op))]
+                           :proposals [(proposal ["docs/link.md"])])]
+            (is (= :deny (:patch/verdict res)))
+            (is (= :path-safety-violation (:patch/reason res)))))
+        (finally
+          (doseq [root [base wt]]
+            (doseq [f (reverse (file-seq root))] (.delete f))))))))
+
+(deftest admit-patch-denies-kernel-deletion-without-promotion
+  (testing "deleting a kernel-namespace file under a standard task requires promotion"
+    (let [res (admit [(op "src/axiom/ledger.clj" :delete digest-a)]
+                     :proposals [(proposal ["src/axiom/ledger.clj"])])]
+      (is (= :deny (:patch/verdict res)))
+      (is (= :self-modification-requires-promotion (:patch/reason res)))))
+  (testing "the same deletion under an elevated task class is allowed"
+    (let [res (admit [(op "src/axiom/ledger.clj" :delete digest-a)]
+                     :proposals [(proposal ["src/axiom/ledger.clj"])]
+                     :task (task :class :task-class/elevated))]
+      (is (= :allow (:patch/verdict res))))))
+
+(deftest verify-patch-binds-the-run-result-to-the-admission
+  (testing "a clean run of the pinned recipe verifies with an evidence digest"
+    (let [allowed (admit [(op "docs/guide.md" :modify digest-a)])
+          res (execute/verify-patch
+               allowed (task)
+               {:verification/recipe ["./scripts/check"]
+                :verification/exit 0
+                :verification/output "ok"})]
+      (is (= :allow (:patch/verdict allowed)))
+      (is (= :verified (:patch/verdict res)))
+      (is (re-matches #"sha256:[0-9a-f]{64}" (:patch/evidence-digest res)))
+      (is (= "synth-task-1" (:patch/task-id res)))))
+  (testing "a nonzero exit is :verification-failed, never a silent pass"
+    (let [allowed (admit [(op "docs/guide.md" :modify digest-a)])
+          res (execute/verify-patch
+               allowed (task)
+               {:verification/recipe ["./scripts/check"]
+                :verification/exit 1
+                :verification/output "boom"})]
+      (is (= :failed (:patch/verdict res)))
+      (is (= :verification-failed (:patch/reason res)))))
+  (testing "a recipe that is not the pinned recipe is :recipe-mismatch"
+    (let [allowed (admit [(op "docs/guide.md" :modify digest-a)])
+          res (execute/verify-patch
+               allowed (task)
+               {:verification/recipe ["rm" "-rf" "/"]
+                :verification/exit 0
+                :verification/output "ok"})]
+      (is (= :invalid (:patch/verdict res)))
+      (is (= :recipe-mismatch (:patch/reason res)))))
+  (testing "malformed inputs are :invalid"
+    (is (= :malformed (:patch/reason
+                       (execute/verify-patch nil (task)
+                                             {:verification/recipe ["./scripts/check"]
+                                              :verification/exit 0}))))
+    (let [allowed (admit [(op "docs/guide.md" :modify digest-a)])]
+      (is (= :malformed (:patch/reason
+                         (execute/verify-patch allowed (task) nil)))))))
