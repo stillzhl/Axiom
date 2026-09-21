@@ -18,6 +18,7 @@
             [axiom.model :as model]
             [axiom.store :as store]
             [axiom.adapters.agent :as agent]
+            [axiom.adapters.pr :as pr]
             [axiom.adapters.worktree :as worktree]
             [clojure.edn :as edn])
   (:import (java.io File)
@@ -102,6 +103,15 @@
                         :task/capabilities (:task/capabilities task)
                         :task/evaluator evaluator-id}
             _ (record! ledger/record-task :task-event task-event)
+            ;; 1b. Self-modifying tasks must run under the pinned
+            ;; previous evaluator release (R11); the candidate's own
+            ;; code is never the authority for its own acceptance.
+            _ (when (and (= :task-class/self-modifying (:task/class task))
+                         (not= (:task/pinned-evaluator task) evaluator-id))
+                (throw (ex-info "Self-modifying task requires the pinned previous evaluator"
+                               {:axiom/error :invalid
+                                :task/id (:task/id task)
+                                :task/class (:task/class task)})))
             ;; 2. Lease acquisition with fencing token
             fencing-token (str "synth-fence-" (model/digest (:task/id task)))
             lease-event {:event/kind :lease/acquired
@@ -226,12 +236,24 @@
                              {:event/kind :task/completed
                               :task/id (:task/id task)
                               :task/evaluator evaluator-id})
-                    {:supervisor/exit 0
-                     :supervisor/report {:task/id (:task/id task)
-                                         :task/status :completed
-                                         :patch/digest (:patch/digest patch-verdict)
-                                         :patch/evidence-digest (:patch/evidence-digest verify-res)
-                                         :proposal/steps proposal-results}})))))))
+                    ;; 8. PR publication: only with a recorded
+                    ;; `:governance/publication-authorized` event;
+                    ;; without it the patch stays local. There is no
+                    ;; merge code path anywhere.
+                    (let [pub-event (:task/publication-authorized task)
+                          published (when (pr/publication-authorized?
+                                           pub-event (:task/id task))
+                                      (pr/create-pr {:pr/kind :fake
+                                                     :pr/task-id (:task/id task)
+                                                     :pr/patch-digest (:patch/digest patch-verdict)}))]
+                      {:supervisor/exit 0
+                       :supervisor/report {:task/id (:task/id task)
+                                           :task/status :completed
+                                           :patch/digest (:patch/digest patch-verdict)
+                                           :patch/evidence-digest (:patch/evidence-digest verify-res)
+                                           :proposal/steps proposal-results
+                                           :pr/published (boolean (:pr/ok published))
+                                           :pr/reference (:pr/reference published)}}))))))))
       (catch clojure.lang.ExceptionInfo e
         {:supervisor/exit (if (= :invalid (:axiom/error (ex-data e))) 4 5)
          :supervisor/report {:error (or (:axiom/error (ex-data e)) :operational)

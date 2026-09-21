@@ -27,6 +27,7 @@
             [axiom.worktree-test]
             [axiom.patch-test]
             [axiom.agent-test]
+            [axiom.adapters.pr-test]
             [axiom.supervisor-test]))
 
 (defn -main [& _]
@@ -57,6 +58,7 @@
                                              'axiom.worktree-test
                                              'axiom.patch-test
                                              'axiom.agent-test
+                                             'axiom.adapters.pr-test
                                              'axiom.supervisor-test)]
     (shutdown-agents)
     (System/exit (if (zero? (+ fail error)) 0 1))))
