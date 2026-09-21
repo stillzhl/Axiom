@@ -335,3 +335,55 @@ implementation (tasks T1–T8) is pending.
   them end-to-end (the T8 `run-task` wiring) is the next
   slice. The fake agent's scripted proposals are fixtures;
   the process agent never runs untrusted code in tests.
+
+## Slice E2 evidence — T6 corrections (2026-09-21)
+
+Focused correction PR for the T6 audit findings (PR #32 merged
+green but the audit identified integration gaps):
+
+1. **Symlink diff integration (fixed).** `diff-worktree`
+   previously emitted symlink operations with `:diff/digest
+   nil`, while `admit-patch`'s `diff-shape-ok?` requires a
+   SHA-256 digest on every operation — an actual
+   adapter-produced symlink became `:invalid/:malformed`
+   instead of the required `:path-safety-violation`.
+   `list-files` now records a symlink's digest as the SHA-256
+   of its link target (via `readSymbolicLink`, which never
+   follows the link). The shape check passes, and
+   `patch-path-safe?` denies with `:path-safety-violation`.
+   New end-to-end test: a real symlink through
+   `diff-worktree` → `admit-patch` yields `:deny` /
+   `:path-safety-violation`.
+
+2. **Approved-policy gate (reviewed, no change).** R8's "gate
+   evaluation under the approved policy" describes the
+   admission function's nature — a pure gate with named
+   reasons evaluated only when an approved policy is present
+   — not a call into `axiom.gate` (which evaluates PR
+   check-run gates, a different domain from spec 0005). The
+   `:governance/policy-approved` event is itself a
+   hash-chained ledger event; its content is referenced by
+   `:governance/policy-id`. The current presence/shape check
+   with `:no-approved-policy` denial satisfies the gate.
+
+3. **Post-action verification (fixed).** New pure
+   `axiom.execute/verify-patch`: binds the verification run
+   result to the `:allow` verdict, requires the executed
+   recipe to equal the pinned recipe byte-for-byte
+   (`:recipe-mismatch` otherwise), and constructs the
+   `:patch/evidence-digest` bound to the patch digest — the
+   digest the `:patch/admitted` ledger event records. Nonzero
+   exit is `:verification-failed`, never a silent pass. The
+   recipe execution itself remains a T8 supervisor effect.
+
+4. **Kernel deletion (fixed).** The class check no longer
+   excludes `:delete` operations: deleting a
+   kernel-namespace file (e.g. `src/axiom/ledger.clj`) under a
+   `:task-class/standard` task now denies with
+   `:self-modification-requires-promotion`; the same deletion
+   under `:task-class/elevated` is allowed.
+
+- `./scripts/check` on `feat/0006-t6-corrections`:
+  **287 tests, 2758 assertions, 0 failures, 0 errors**
+  (Temurin 17.0.20, Clojure 1.12.0); all CLI gates green,
+  no network, all fixtures `synth-*`.

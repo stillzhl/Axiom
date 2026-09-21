@@ -981,8 +981,7 @@
                                           diff))
                          :no-approved-proposal)
                        (when (and (= :task-class/standard (:task/class task))
-                                  (some #(and (not= :delete (:diff/op %))
-                                              (kernel-path? (:diff/path %)))
+                                  (some #(kernel-path? (:diff/path %))
                                         diff))
                          :self-modification-requires-promotion))]
         (if reason
@@ -993,6 +992,72 @@
            :patch/digest (patch-digest diff)
            :patch/verification-recipe (:task/pinned-recipe task)
            :patch/task-id task-id})))))
+
+;; ------------------------------------------------------------------
+;; Post-action verification (T6 correction)
+;;
+;; R8(d): post-action verification runs the pinned verification
+;; recipe and records its evidence in the ledger. The recipe
+;; execution itself is a supervisor effect (T8 wires it through
+;; the process adapter); `verify-patch` is the pure
+;; result-validation half: it binds the run result to the
+;; admitted patch, requires the executed recipe to equal the
+;; pinned recipe byte-for-byte, and constructs the evidence
+;; digest the `:patch/admitted` ledger event records. A recipe
+;; mismatch or a nonzero exit is a named failure, never a silent
+;; pass.
+
+(defn verify-patch
+  "Pure post-action verification. Takes the `:allow` verdict from
+   `admit-patch`, the task, and the `verification-result`
+   (`{:verification/recipe [...], :verification/exit <int>,
+   :verification/output <string>}`). Returns
+   `{:patch/verdict :verified, :patch/evidence-digest <d>,
+   :patch/task-id <id>}` when the pinned recipe ran and exited
+   0; `{:patch/verdict :failed, :patch/reason
+   :verification-failed}` when it ran but exited nonzero; or
+   `{:patch/verdict :invalid, :patch/reason <named>}` for
+   malformed inputs, a non-`:allow` patch, or a recipe that is
+   not the pinned recipe."
+  [admitted-patch task verification-result]
+  (let [task-id (:task/id task)
+        pinned (:task/pinned-recipe task)]
+    (cond
+      (or (not (map? admitted-patch))
+          (not= :allow (:patch/verdict admitted-patch))
+          (not (sha256-digest? (:patch/digest admitted-patch)))
+          (not (map? task))
+          (not (non-blank-string? task-id))
+          (not (sequential? pinned))
+          (not (map? verification-result)))
+      {:patch/verdict :invalid
+       :patch/reason :malformed
+       :patch/task-id task-id}
+
+      (not= (vec pinned) (vec (:verification/recipe verification-result)))
+      {:patch/verdict :invalid
+       :patch/reason :recipe-mismatch
+       :patch/task-id task-id}
+
+      (not (integer? (:verification/exit verification-result)))
+      {:patch/verdict :invalid
+       :patch/reason :malformed
+       :patch/task-id task-id}
+
+      (not (zero? (:verification/exit verification-result)))
+      {:patch/verdict :failed
+       :patch/reason :verification-failed
+       :patch/task-id task-id
+       :patch/exit (:verification/exit verification-result)}
+
+      :else
+      {:patch/verdict :verified
+       :patch/evidence-digest
+       (model/digest {:patch/digest (:patch/digest admitted-patch)
+                      :verification/recipe (vec pinned)
+                      :verification/output
+                      (str (:verification/output verification-result))})
+       :patch/task-id task-id})))
 
 ;; ------------------------------------------------------------------
 ;; Budget enforcement (T7)
