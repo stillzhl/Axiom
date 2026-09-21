@@ -631,6 +631,68 @@
   (validate-outbox-event! (:outbox/event payload))
   payload)
 
+(def patch-event-kinds
+  "The `:patch/*` event kinds this slice records (R8)."
+  #{:patch/admitted :patch/rejected})
+
+(defn- validate-patch-event!
+  "Strict per-kind validation of a `:patch/*` event map. Every kind
+   requires the task id, the exact patch digest, and the recording
+   evaluator identity. `:patch/admitted` additionally requires the
+   post-action verification evidence digest (the pinned recipe ran
+   and its evidence is in the ledger); `:patch/rejected` names the
+   denial reason. Unknown or malformed patch events are :invalid
+   and can never be written."
+  [event]
+  (ensure! (map? event) "Patch record must carry an event map" {})
+  (let [kind (:event/kind event)]
+    (ensure! (contains? patch-event-kinds kind)
+             "Unknown patch event kind" {:event/kind kind})
+    (case kind
+      :patch/admitted
+      (do (event-shape! event kind
+                        #{:event/kind :task/id :patch/digest
+                          :patch/evidence-digest :task/evaluator}
+                        #{:event/kind :event/id :task/id :patch/digest
+                          :patch/evidence-digest :task/evaluator
+                          :patch/admitted-at :patch/policy-id})
+          (ensure! (non-blank-string? (:task/id event))
+                   "Patch task id must be a non-blank string" {})
+          (ensure! (digest? (:patch/digest event))
+                   "Patch digest must be a sha256 digest" {})
+          (ensure! (digest? (:patch/evidence-digest event))
+                   "Patch evidence digest must be a sha256 digest" {})
+          (ensure! (non-blank-string? (:task/evaluator event))
+                   "Patch event requires an evaluator identity" {:kind kind})
+          (when (contains? event :patch/policy-id)
+            (ensure! (non-blank-string? (:patch/policy-id event))
+                     "Patch policy id must be a non-blank string" {})))
+
+      :patch/rejected
+      (do (event-shape! event kind
+                        #{:event/kind :task/id :patch/digest :patch/reason
+                          :task/evaluator}
+                        #{:event/kind :event/id :task/id :patch/digest
+                          :patch/reason :task/evaluator :patch/rejected-at})
+          (ensure! (non-blank-string? (:task/id event))
+                   "Patch task id must be a non-blank string" {})
+          (ensure! (digest? (:patch/digest event))
+                   "Patch digest must be a sha256 digest" {})
+          (ensure! (keyword? (:patch/reason event))
+                   "Patch rejection reason must be a named reason" {})
+          (ensure! (non-blank-string? (:task/evaluator event))
+                   "Patch event requires an evaluator identity" {:kind kind}))))
+  event)
+
+(defn- validate-patch-record!
+  "Strict validation of a `:patch` payload: the exact record shape
+   plus per-kind event validation. Unknown or malformed patch events
+   are :invalid and can never be written."
+  [payload]
+  (shape! payload #{:record/kind :patch/event} :patch-record)
+  (validate-patch-event! (:patch/event payload))
+  payload)
+
 (def ^:private gate-decisions #{:allow :deny :defer :invalid})
 (def ^:private gate-outcomes
   #{:satisfied :unknown :stale :failed :forged :violated :defer})
@@ -760,6 +822,7 @@
       :task (validate-task-record! payload)
       :lease (validate-lease-record! payload)
       :outbox (validate-outbox-record! payload)
+      :patch (validate-patch-record! payload)
       (model/invalid! "Unknown record kind" {:record/kind (:record/kind payload)})))
   envelope)
 
@@ -868,6 +931,28 @@
                         :candidate/id (model/candidate-id outbox-event)
                         :payload {:record/kind :outbox
                                   :outbox/event outbox-event})]
+    (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope))))))
+
+(defn record-patch
+  "Pure construction of the envelope to store for a patch-admission
+   event (`:patch/admitted`, `:patch/rejected`). The event is
+   validated strictly per kind: every kind requires the task id, the
+   exact patch digest, and the recording evaluator identity;
+   `:patch/admitted` additionally requires the post-action
+   verification evidence digest (the pinned recipe ran and its
+   evidence is in the ledger — an unadmitted patch is never
+   published); `:patch/rejected` names the denial reason. The
+   envelope's :candidate/id is the content digest of the event
+   (`axiom.model/candidate-id`): Axiom never invents an identity.
+   Returns the envelope without :seq; the store assigns the
+   sequence transactionally."
+  [prev-envelope {:keys [patch-event] :as inputs}]
+  (ensure! (map? patch-event) "record-patch requires a patch event map" {})
+  (validate-patch-event! patch-event)
+  (let [envelope (assoc (base-envelope prev-envelope inputs)
+                        :candidate/id (model/candidate-id patch-event)
+                        :payload {:record/kind :patch
+                                  :patch/event patch-event})]
     (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope))))))
 
 (defn record-event
@@ -990,7 +1075,7 @@
     :scenario (vec (get-in envelope [:payload :scenario :events]))
     :event [(get-in envelope [:payload :event])]
     (:observation :evidence-record :decision/gate-evaluation :governance
-     :task :lease :outbox) []
+     :task :lease :outbox :patch) []
     (operational! "Unknown record kind in stored envelope"
                   {:record/kind (get-in envelope [:payload :record/kind])})))
 

@@ -860,3 +860,136 @@
                             :outbox/idempotency-key key}])
                     nil))))
         intents))
+
+;; ------------------------------------------------------------------
+;; Patch admission (T6)
+;;
+;; Pure admission verdict over (task, diff, admitted-proposals,
+;; lease, presented-token, approved-policy). The diff is a list of
+;; path operations produced by the worktree adapter — the
+;; supervisor never trusts the worker's own description of what
+;; changed:
+;;   [{:diff/path <repo-relative>, :diff/op :add|:modify|:delete,
+;;     :diff/digest <sha256:...>, :diff/symlink? bool}]
+;;
+;; Checks, in order: (a) shape validation (:invalid); (b) an
+;; approved policy governs the admission (:no-approved-policy);
+;; (c) lease current with a matching fencing token
+;; (:no-lease-held / :stale-fencing-token); (d) path safety — no
+;; traversal, no symlink escape, no submodule injection
+;; (:path-safety-violation); (e) every changed path covered by an
+;; admitted proposal (:no-approved-proposal); (f) class check —
+;; kernel-namespace writes under a standard task
+;; (:self-modification-requires-promotion).
+;;
+;; The verdict is `:allow` (publishable, pending R10
+;; authorization), `:deny` with a named reason, or `:invalid`.
+;; An allowed patch carries its content digest and the task's
+;; pinned verification recipe; post-action verification runs
+;; that recipe and records the evidence separately.
+
+(def ^:private diff-ops
+  #{:add :modify :delete})
+
+(defn- diff-shape-ok?
+  [diff]
+  (and (sequential? diff)
+       (seq diff)
+       (every? (fn [op]
+                 (and (map? op)
+                      (non-blank-string? (:diff/path op))
+                      (contains? diff-ops (:diff/op op))
+                      (sha256-digest? (:diff/digest op))
+                      (contains? op :diff/symlink?)))
+               diff)))
+
+(defn- patch-path-safe?
+  "The 0002/0003 path rules applied to a diff operation: no
+   absolute paths, no `..` traversal, no symlinks, no submodule
+   injection (a `.gitmodules` entry or a `.git` path)."
+  [{:diff/keys [path symlink?] :as _op}]
+  (and (non-blank-string? path)
+       (not (str/starts-with? path "/"))
+       (not (git/path-escapes-root? path))
+       (not symlink?)
+       (not (or (= path ".gitmodules")
+                (str/starts-with? path ".git/")
+                (= path ".git")))))
+
+(defn- proposal-covers?
+  "True when an admitted proposal has an action naming the diff
+   path exactly, or a directory prefix covering it."
+  [admitted-proposals diff-path]
+  (boolean
+   (some (fn [proposal]
+           (some (fn [action]
+                   (let [p (:action/path action)]
+                     (and (string? p)
+                          (or (= p diff-path)
+                              (str/starts-with? diff-path (str p "/"))))))
+                 (:proposal/actions proposal)))
+         admitted-proposals)))
+
+(defn patch-digest
+  "Content digest of the diff: the exact patch identity recorded
+   on admission and referenced by publication (R10). Pure."
+  [diff]
+  (model/digest diff))
+
+(defn admit-patch
+  "Admit or deny a worker-produced patch against the task, the
+   admitted proposals, the current lease, and the approved
+   policy. Returns `{:patch/verdict :allow, :patch/digest <d>,
+   :patch/verification-recipe [...]}` or `{:patch/verdict :deny,
+   :patch/reason <named>}` or `{:patch/verdict :invalid,
+   :patch/reason :malformed}`. Checks run in the spec order; the
+   first failure denies the whole patch — partial admission is
+   never offered."
+  [task diff admitted-proposals lease presented-token approved-policy]
+  (let [task-id (:task/id task)]
+    (cond
+      (or (not (map? task)) (not (non-blank-string? task-id))
+          (not (diff-shape-ok? diff))
+          (not (sequential? admitted-proposals))
+          (not (map? lease)))
+      {:patch/verdict :invalid
+       :patch/reason :malformed
+       :patch/task-id task-id}
+
+      (not (and (map? approved-policy)
+                (= :governance/policy-approved (:event/kind approved-policy))
+                (non-blank-string? (:governance/policy-id approved-policy))))
+      {:patch/verdict :deny
+       :patch/reason :no-approved-policy
+       :patch/task-id task-id}
+
+      (not (token? (:lease/token lease)))
+      {:patch/verdict :deny
+       :patch/reason :no-lease-held
+       :patch/task-id task-id}
+
+      (not= presented-token (:lease/token lease))
+      {:patch/verdict :deny
+       :patch/reason :stale-fencing-token
+       :patch/task-id task-id}
+
+      :else
+      (let [reason (or (when (not (every? patch-path-safe? diff))
+                         :path-safety-violation)
+                       (when (not (every? #(proposal-covers? admitted-proposals
+                                                             (:diff/path %))
+                                          diff))
+                         :no-approved-proposal)
+                       (when (and (= :task-class/standard (:task/class task))
+                                  (some #(and (not= :delete (:diff/op %))
+                                              (kernel-path? (:diff/path %)))
+                                        diff))
+                         :self-modification-requires-promotion))]
+        (if reason
+          {:patch/verdict :deny
+           :patch/reason reason
+           :patch/task-id task-id}
+          {:patch/verdict :allow
+           :patch/digest (patch-digest diff)
+           :patch/verification-recipe (:task/pinned-recipe task)
+           :patch/task-id task-id})))))

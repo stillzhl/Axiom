@@ -229,3 +229,56 @@ implementation (tasks T1–T8) is pending.
   it lands with the T7 agent adapters and the T8 `run-task`
   wiring. The seed-copy seam stands in for the pinned
   checkout; a real git worktree population is caller-side.
+
+## Slice D evidence — T6 (2026-09-21)
+
+- Pure `axiom.execute/admit-patch` (R8): admission verdict over
+  (task, worktree diff, admitted proposals, lease,
+  presented token, approved policy). The diff is a list of
+  `:diff/path` / `:diff/op` (`:add`/`:modify`/`:delete`) /
+  `:diff/digest` / `:diff/symlink?` operations produced by the
+  worktree adapter — never the worker's own description. Checks
+  in order: shape (`:invalid`); approved
+  `:governance/policy-approved` policy
+  (`:no-approved-policy`); lease/fencing (`:no-lease-held` /
+  `:stale-fencing-token`); path safety — traversal, symlink
+  escape, submodule injection (`:path-safety-violation`);
+  every changed path covered by an admitted proposal
+  (`:no-approved-proposal`); kernel-namespace writes under a
+  standard task (`:self-modification-requires-promotion`).
+  Verdicts are `:allow` (with the content digest and the task's
+  pinned verification recipe), `:deny` with a named reason, or
+  `:invalid`; partial admission is never offered.
+- `axiom.adapters.worktree/diff-worktree`: diffs the worktree
+  against the pinned base directory — added/modified/deleted
+  detection by content digest, symlinks flagged with
+  `:diff/symlink? true` and no digest (their target is never
+  followed). Malformed input and a missing base are named
+  refusals; the base is read, never written.
+- `ledger/record-patch`: strict `:patch/admitted` and
+  `:patch/rejected` events through the 0002 append path.
+  Admitted requires the task id, the exact patch digest, the
+  post-action verification evidence digest, and the evaluator
+  identity; rejected names the denial reason. Patch events are
+  additive provenance — `extract-events` shows zero 0001 world
+  events.
+- New tests: `patch_test` (4 deftests — the `:allow` happy
+  path with digest and pinned recipe; all seven named denials
+  incl. symlink escape → `:path-safety-violation`, uncovered
+  path → `:no-approved-proposal`, standard-task kernel patch
+  → `:self-modification-requires-promotion` and the same
+  patch allowed under `:task-class/self-modifying`; malformed
+  inputs → `:invalid`; ledger record/reject shapes and the
+  0001-world invariance; diff add/modify/delete detection,
+  symlink flagging, and refusal cases). Every identity is
+  `synth-*`; no network, no live credentials.
+- `./scripts/check` on `feat/0006-patch-admission`:
+  **278 tests, 2693 assertions, 0 failures, 0 errors**
+  (Temurin 17.0.20, Clojure 1.12.0); all CLI gates green
+  (0002–0005 replays, bundles, observations, gates), no
+  network, all fixtures `synth-*`.
+- Honest limits: admission is the pure verdict plus the
+  ledger events; the supervisor loop that runs the pinned
+  verification recipe and records `:patch/admitted` with the
+  evidence digest lands with the T8 `run-task` wiring. The
+  agent adapters that produce diffs in the loop are T7.
