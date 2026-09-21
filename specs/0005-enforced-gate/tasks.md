@@ -56,15 +56,19 @@
   passed. Acceptance: advisory deployments exit 0 with an explicit
   advisory-mode report and zero provider writes; bypassed gates never
   report allow.
-- [ ] T6: CLI: `gate --repo OWNER/NAME --pr N [--policy DIGEST]`
+- [x] T6: CLI: `gate --repo OWNER/NAME --pr N [--policy DIGEST]`
   (pure evaluation, EDN decision), `publish-check` (capability check
   then publication, or advisory-mode report — the only provider-
   mutating command), `policy-approve` (records governance approval
   events, distinct from candidate evaluation). Exit contract
-  0/4/5 matching 0002–0004. Acceptance: invalid input exits 4,
-  operational failure exits 5; `gate` never mutates provider state;
-  `publish-check` in advisory mode performs zero writes and says so.
-- [ ] T7: Adversarial and boundary tests: the design §13 cases
+  0/4/5 matching 0002–0004. Done 2026-09-20: `src/axiom/cli.clj`
+  implements all three commands behind the `AXIOM_GATE_FIXTURES`
+  offline hook (synthetic fixtures, fake Checks API, zero network);
+  a well-formed but unsatisfiable `--policy` pin is invalid input
+  (4); advisory `publish-check` records the evaluation in the
+  ledger with no publication reference (R8/R9). Tests:
+  `test/axiom/gate_cli_test.clj` (13 tests).
+- [x] T7: Adversarial and boundary tests: the design §13 cases
   relevant to M4 — candidate policy relaxation, renamed checks,
   omitted required verification, stale success presentation,
   verifier-config replacement, forged `:trust/remote-ci`, forged
@@ -72,13 +76,17 @@
   annotation text attempting to override policy, quarantine
   violations (candidate bytes reaching policy loading), capability
   check failures, protection-state changes mid-evaluation.
-  Acceptance: an independent expected-results corpus drives the
-  admission tests (expected outcomes specified before the
-  implementation shapes them); every named bypass class is denied in
-  tests; no test opens a socket or requires live network.
-- [ ] T8: Verification: full `./scripts/check` green, update this
-  spec's `verification.md` with exact commands, test counts and
-  evidence, acceptance-gate review against `acceptance.md`, and mark
-  the spec Verified only with real evidence. No M4 milestone or v1
+  Done 2026-09-20: `examples/synthetic-gate/adversarial-corpus.edn`
+  (41 cases, expectations authored independently of the
+  implementation) driven by
+  `test/axiom/gate_adversarial_test.clj`; every named bypass class
+  is denied (never allowed); no test opens a socket or requires
+  live network.
+- [x] T8: Verification: full `./scripts/check` green, this spec's
+  `verification.md` updated with exact commands, test counts and
+  evidence, acceptance-gate review against `acceptance.md`. Done
+  2026-09-20: `./scripts/check` green on Temurin 17.0.20 /
+  Clojure 1.12.0 (212 tests, 2137 assertions, 0 failures/errors);
+  0005 CLI probes added to `scripts/check`. No M4 milestone or v1
   acceptance is claimed from this spec alone; milestone gates belong
   to the design's M4 gate review.

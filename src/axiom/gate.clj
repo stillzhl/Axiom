@@ -361,8 +361,8 @@
 (defn report-bypassed
   "Pure: reports a gate as `:bypassed` (distinct from `:allow`) when
    an administrator bypass is observed. Takes the gate decision and
-   an admin-bypass event carrying `:bypass/actor` and
-   `:bypass/reason` (see `axiom.capability/admin-bypass-event`).
+   an admin-bypass event carrying `:governance/actor` and
+   `:governance/reason` (see `axiom.capability/admin-bypass-event`).
 
    The returned decision keeps its reasons and gains `:gate/bypass`
    naming the actor and reason; the outcome is `:bypassed`, never
@@ -374,8 +374,8 @@
   (when-not (and (map? decision) (keyword? (:gate/decision decision)))
     (throw (ex-info "report-bypassed requires a gate decision map"
                     {:axiom/error :invalid})))
-  (let [actor (:bypass/actor bypass-event)
-        reason (:bypass/reason bypass-event)]
+  (let [actor (:governance/actor bypass-event)
+        reason (:governance/reason bypass-event)]
     (when-not (non-blank-string? actor)
       (throw (ex-info "Admin bypass event is missing its actor"
                       {:axiom/error :invalid})))

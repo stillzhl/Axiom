@@ -70,7 +70,11 @@ deployment's reserved policy paths is denied with reason
 Policy identity is `(policy-id, content-digest)`. Approval is an
 event, not a file's presence: the gate accepts a policy only when a
 `:governance/policy-approved` event for `(policy-id, digest)` exists
-in the ledger and no revocation event for that digest exists. Digest
+in the ledger and no `:governance/policy-revoked` event for that
+digest exists. Revocation is authorizer-governed (R2 amendment
+2026-09-20): it names the revoked digest and the authorizer, and a
+revoked digest resolves to `:deferred` with reason
+`:policy-approval-revoked`. Digest
 algorithm is SHA-256 over the canonical EDN encoding (the 0001
 canonical-decision encoding, reused). Unknown or unapproved digests
 make every dependent gate `:defer` with reason

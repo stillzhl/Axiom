@@ -1,0 +1,14 @@
+;; Synthetic approved-policy content, revision 2: same policy id as
+;; v1 with an added required gate, so approving it supersedes the v1
+;; approval. All identities invented (`synth-*`).
+{:policy/id "synth-approve-policy"
+ :policy/reserved-paths ["policies/"]
+ :policy/gates
+ [{:gate/id :ci
+   :gate/check-run-id 9001
+   :gate/workflow-identity ".github/workflows/synth-ci.yml"
+   :gate/required true}
+  {:gate/id :lint
+   :gate/check-run-id 9002
+   :gate/workflow-identity ".github/workflows/synth-lint.yml"
+   :gate/required true}]}
