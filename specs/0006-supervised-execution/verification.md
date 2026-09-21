@@ -459,3 +459,98 @@ green but the audit identified integration gaps):
   --adapter process` loop is not covered by an automated
   test. Proposal events are not in the 0006 ledger schema —
   admissions are recorded in the report, not the ledger.
+
+## First self-hosting run (2026-09-21)
+
+The first self-driven Axiom change, executed through the spec 0006
+supervised-execution machinery. The change: `docs/self-hosting/first-run.md`
+(the self-hosting runbook) — a bounded docs change outside the
+trust-critical kernel, per 0006's first-task rule. Published as PR #39
+(open, unmerged — there is no merge code path; merging stays a human
+governance decision).
+
+### How it ran
+
+`axiom run-task --adapter process` cannot drive a real process agent:
+the supervisor calls `run-agent` with no `:agent/argv`, so the
+adapter fails `:malformed` on the first step and the resulting empty
+diff is rejected by `admit-patch` (`:blocked :malformed`, verified
+empirically 2026-09-21). The run therefore drove the **same pure
+policy functions and the same real adapters in the same guarded
+order** as `run-task`, via a driver script
+(`~/workspace/axiom-selfhost/driver.clj`, task
+`~/workspace/axiom-selfhost/task.edn`):
+
+1. Task admission recorded (`:task/accepted`); lease acquired via
+   `axiom.execute/acquire-lease` with fencing token
+   `selfhost-fence-<digest(task-id)>` (`:lease/acquired`); budgets
+   checked pre/post via `axiom.execute/check-budgets` (held).
+2. Real worktree via `axiom.adapters.worktree/create-worktree`,
+   seeded from a `git archive` of pinned base `f281f1d`.
+3. Real `:process` agent: `/usr/bin/python3 /tmp/selfhost/agent.py`
+   spawned as a bounded subprocess (cwd confined to the worktree,
+   env scrubbed, 60s timeout, exit 0). The agent wrote
+   `docs/self-hosting/first-run.md` and printed a proposal EDN.
+4. Negative probes denied for real by
+   `axiom.execute/evaluate-proposal`: `:stale-fencing-token`
+   (wrong token), `:out-of-scope` (`src/axiom/gate.clj`),
+   `:unauthorized-capability` (`:capability/shell`).
+5. Proposal admitted; agent-claimed `:action/content-digest`
+   cross-checked byte-for-byte against the worktree file.
+6. `worktree/diff-worktree`: exactly one op
+   (`:add docs/self-hosting/first-run.md`).
+7. `axiom.execute/admit-patch` allowed under approved policy
+   `spec-0006-verified` with the current fencing token.
+8. The pinned recipe
+   `["sh" "-c" "test -s docs/self-hosting/first-run.md && grep -q '^# ' docs/self-hosting/first-run.md"]`
+   executed **for real** in the worktree (exit 0);
+   `axiom.execute/verify-patch` verified and bound the evidence.
+9. `:patch/admitted` (patch digest + evidence digest) and
+   `:task/completed` appended through the 0002 hash-chained path.
+10. Publication gate: the recorded
+    `:governance/publication-authorized` event (policy
+    `standing-axiom-autopilot-2026-09-21`) checked via the pure
+    `pr/publication-authorized?` — true — then the worker
+    published PR #39 via the GitHub API (no real GitHub PR
+    adapter exists in-repo; `:pr/kind :fake` only records
+    `synth-pr-*` references).
+
+### Digests and ledger records
+
+- patch-digest:
+  `sha256:c6ac27a308d15e595035d2d1f4f980d3afe5ef7888f13168582c53e39da3c912`
+- evidence-digest:
+  `sha256:d3610eabea02ddd52d1854acb5d28f80682c424ed82dc122a5e3e9e91050a8c7`
+- admitted file sha256:
+  `de139cddc7a90308cf4c35a1440328faf68373baf587f8f67dee89669313c92b`
+  (agent output byte-identical to the published file)
+- Run ledger (SQLite, hash-chained, 4 envelopes): seq 0
+  `:task/accepted` (candidate
+  `sha256:1091dc0464dc35df73bf95d165be0997af752c4d2bf8053a649763edb076137c`),
+  seq 1 `:lease/acquired` (candidate
+  `sha256:3a82c440b2de93a8b566d60f26b185bf3a2b731b94186d61765a4b54a1294475`),
+  seq 2 `:patch/admitted` (candidate
+  `sha256:1be5c84ef83dfe00706a9409ddaa12148490e69ed0d253aa835e6ff61c473d6f`),
+  seq 3 `:task/completed` (candidate
+  `sha256:c05be0f9d382856f7a4d1d332753fba000920073f5c36713903d3f5beac4be91`).
+  Ledger db sha256:
+  `a8a093037d6d7ff28c59befc436f740c8de5de0943b2c027f5b6a8505f067dd0`;
+  full envelope export and driver preserved at
+  `~/workspace/axiom-selfhost/`.
+
+### Honest limits
+
+- The agent was a bounded script, not an autonomous agent: this
+  run proves the **governance** (admission, fencing, patch
+  checks, verification, ledger evidence), not agent reliability.
+- The governance authorization was kept as task data (the 0006
+  mechanism); recording it as a ledger claim failed validation
+  (`record-event` requires a 0001-shaped event with
+  `:candidate/id`), which is itself an honest finding about the
+  current schema, not a bypass.
+- Prompt-escape resistance remains tested against synthetic
+  adversaries only; the process adapter is not a sandboxing
+  proof.
+- Wiring `:agent/argv` through `supervisor/run-task` so the CLI
+  itself can drive a `:process` agent is M6+ work; until then,
+  real runs use the driver pattern documented here.
