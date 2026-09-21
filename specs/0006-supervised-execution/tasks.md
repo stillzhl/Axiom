@@ -69,7 +69,7 @@ Slice 1 (2026-09-20, PR #28): T1–T2 implemented in the pure
   uncertain intent is resolved by provider query, never by
   blind re-execution (asserted against the fake provider
   double).
-- [ ] T5: Capability dispatch and the isolated worktree adapter
+- [x] T5: Capability dispatch and the isolated worktree adapter
   shape: the grant model on the task record, the pure
   `check-capability` predicate, the closed capability set
   (`:unknown-capability` rejected), and

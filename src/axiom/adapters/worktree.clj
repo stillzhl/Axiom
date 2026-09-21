@@ -168,3 +168,74 @@
     (do (delete-tree! (Paths/get ^String path (into-array String [])))
         {:worktree/ok true
          :worktree/id id})))
+
+;; ------------------------------------------------------------------
+;; Worktree diff (T6)
+;;
+;; Produces the path-operation list that `axiom.execute/admit-patch`
+;; consumes — the supervisor never trusts the worker's own
+;; description of what changed. Each operation carries the
+;; repo-relative path, the op (:add/:modify/:delete), the
+;; content digest, and whether the worktree entry is a symlink
+;; (symlinks are denied at admission with :path-safety-violation).
+
+(defn- list-files
+  "Map of repo-relative path -> {:digest <sha256:...> | nil,
+   :symlink? bool} for every file under `root`. Directories are
+   not listed; symlinks are recorded with :symlink? true and no
+   digest (their target is never followed)."
+  [^Path root]
+  (let [acc (java.util.HashMap.)]
+    (Files/walkFileTree
+     root
+     (proxy [SimpleFileVisitor] []
+       (visitFile [file _attrs]
+         (let [rel (str (.relativize root ^Path file))
+               symlink? (Files/isSymbolicLink ^Path file)]
+           (.put acc rel
+                  {:digest (when-not symlink?
+                             (model/sha256-bytes (Files/readAllBytes ^Path file)))
+                    :symlink? (boolean symlink?)}))
+         FileVisitResult/CONTINUE)))
+    (into {} acc)))
+
+(defn diff-worktree
+  "Diffs the worktree against the pinned base directory. Returns
+   `{:worktree/ok true, :diff/operations [...]}` where each
+   operation is `{:diff/path, :diff/op :add|:modify|:delete,
+   :diff/digest <sha256:...>, :diff/symlink? bool}` — the digest
+   of a deleted path is the base digest; a symlink never gets a
+   digest. Malformed input yields `:malformed`; a missing base
+   yields `:base-unavailable`. The base is read, never written."
+  [{:worktree/keys [path] :as _worktree} base-dir]
+  (cond
+    (not (and (non-blank-string? path) (non-blank-string? base-dir)))
+    {:worktree/ok false :worktree/reason :malformed}
+
+    (not (Files/isDirectory (Paths/get ^String base-dir (into-array String []))
+                            (into-array java.nio.file.LinkOption [])))
+    {:worktree/ok false :worktree/reason :base-unavailable}
+
+    :else
+    (let [wt-root (Paths/get ^String path (into-array String []))
+          base-root (Paths/get ^String base-dir (into-array String []))
+          wt-files (list-files wt-root)
+          base-files (list-files base-root)
+          ops (vec (concat
+                    ;; added or modified
+                    (for [[p {:keys [digest symlink?]}] wt-files
+                          :let [b (get base-files p)]
+                          :when (or (nil? b) (not= digest (:digest b)))]
+                      {:diff/path p
+                       :diff/op (if (nil? b) :add :modify)
+                       :diff/digest (or digest (:digest b))
+                       :diff/symlink? symlink?})
+                    ;; deleted
+                    (for [[p {:keys [digest]}] base-files
+                          :when (not (contains? wt-files p))]
+                      {:diff/path p
+                       :diff/op :delete
+                       :diff/digest digest
+                       :diff/symlink? false})))]
+      {:worktree/ok true
+       :diff/operations (sort-by :diff/path ops)})))
