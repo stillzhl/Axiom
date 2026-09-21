@@ -104,4 +104,5 @@ acceptance gates are recorded. Verification is pending implementation.
   limits.
 
 Spec status: **Verified** (2026-09-21) — all implementation gates
-met. M5 milestone gate review pending.
+met. M5 milestone gate review: **Complete** (2026-09-21),
+`docs/gate-reviews/m5-supervised-execution.md`; roadmap M5 row → Complete.
