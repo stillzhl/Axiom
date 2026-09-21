@@ -1,6 +1,8 @@
 # 0005 — Enforced verification gate (trusted evaluation and check publication)
 
-Status: Accepted for implementation; verification pending.
+Status: Verified (2026-09-20) — every implementation gate in
+acceptance.md is satisfied with real evidence recorded in
+verification.md. No M4 milestone or v1 acceptance is claimed.
 
 Authority: the repository owner's 2026-09-20 instruction, "Start to implement
 axiom", with the attached design plan, authorizes bounded slices. The owner's
@@ -57,11 +59,17 @@ real repository identities may appear in this repo's fixtures or evidence.
   GitHub App instance, bound to an evaluator identity; (c) the *candidate*
   — the untrusted PR content. Authorization events are recorded in the
   ledger as distinct event kinds (`:governance/policy-approved`,
-  `:governance/verifier-config-approved`, `:governance/protection-changed`)
-  carrying the authorizer identity, the digest of what was approved, and
-  the prior digest being superseded. A gate run records which policy
-  approval it executed under; a run that cannot name its policy approval
-  is `:invalid`, never allowed.
+  `:governance/policy-revoked`, `:governance/verifier-config-approved`,
+  `:governance/protection-changed`) carrying the authorizer identity,
+  the digest of what was approved, and the prior digest being
+  superseded. A gate run records which policy approval it executed
+  under; a run that cannot name its policy approval is `:invalid`,
+  never allowed. Amendment 2026-09-20 (final slice):
+  `:governance/policy-revoked` is authorizer-governed like the
+  approval kinds: it names the revoked policy digest and the
+  authorizer, and once recorded the revoked digest resolves to
+  `:deferred` with reason `:policy-approval-revoked`, never to
+  allow — revocation withdraws a policy without deleting history.
 - R3: Untrusted inputs stay quarantined. Candidate content (PR diff,
   commit SHAs, workflow names, check names presented by the candidate
   branch, approval comments on the candidate) is data under evaluation

@@ -47,36 +47,47 @@ recorded before any implementation, per the repo's contributor instructions.
 Spec status after this slice: **Accepted** — requirements, design, tasks and
 acceptance gates are recorded. Verification is pending implementation.
 
-## Implementation acceptance (pending)
+## Implementation acceptance (met 2026-09-20)
 
-- [ ] `./scripts/check` is green on Temurin 17.0.20 / Clojure 1.12.0
-  with the 0005 gates: 0005 gates evaluate synthetic candidates
-  against approved-policy fixtures, assert allow/deny/defer with named
-  reasons, publish through the fake Checks API and assert identity
+- [x] `./scripts/check` is green on Temurin 17.0.20 / Clojure 1.12.0
+  with the 0005 gates: **214 tests, 2154 assertions, 0 failures,
+  0 errors**; the 0005 probes evaluate synthetic candidates
+  against approved-policy fixtures (allow/defer/deny with named
+  reasons), publish through the fake Checks API asserting identity
   binding and idempotency, and exercise the advisory-mode fallback;
   the 0001–0004 exit contracts are unchanged; `git diff --check`
-  clean. Remote CI: green from a clean checkout. No live network
-  access in the check gates.
-- [ ] All five anti-bypass classes are denied in tests with named
-  reasons: policy edit in candidate, verifier replacement without
-  governance approval, renamed check, omitted required verification,
-  stale success. Each bypass attempt yields deny/defer, never allow.
-- [ ] Approved-policy loading rejects unapproved digests and
-  candidate-branch policy sources structurally; a run that cannot name
-  its policy approval is `:invalid`.
-- [ ] `:trust/remote-ci` appears only with a valid evaluator-bound
+  clean. Remote CI: pending (PR #25, must be green before merge).
+  No live network access in the check gates.
+- [x] All five anti-bypass classes are denied in tests with named
+  reasons: policy edit in candidate (`:policy-path-touched-by-candidate`
+  → deny), verifier replacement without governance approval
+  (`:invalid`), renamed check (`:no-matching-check-run` → defer),
+  omitted required verification (`:no-matching-check-run` → defer),
+  stale success (`:stale-check-run` → deny). Each bypass attempt
+  yields deny/defer, never allow — machine-checked by the
+  `bypass-classes-never-allow` test over the 41-case independent
+  corpus.
+- [x] Approved-policy loading rejects unapproved digests and
+  candidate-branch policy sources structurally; a revoked digest
+  resolves to `:deferred` with reason `:policy-approval-revoked`; a
+  run that cannot name its policy approval is `:invalid`.
+- [x] `:trust/remote-ci` appears only with a valid evaluator-bound
   publication reference and a current trusted observation; earlier
   marks are never promoted; forged marks are `:invalid` at ledger
   validation.
-- [ ] `publish-check` publishes only after a passing capability check;
+- [x] `publish-check` publishes only after a passing capability check;
   in advisory mode it performs zero provider writes and reports
   advisory mode explicitly. Administrator bypasses are recorded as
-  `:governance/admin-bypass` and reported as `:bypassed`.
-- [ ] Gate evaluations, publications and governance events append
-  through the 0002 path; snapshots remain replay-equivalent; replay of
-  a prefix reproduces recorded gate decisions verbatim with their
-  policy digests.
-- [ ] verification.md records exact commands, results and remaining
+  `:governance/admin-bypass` and reported as `:bypassed`, never as
+  passed.
+- [x] Gate evaluations, publications and governance events append
+  through the 0002 path; snapshots remain replay-equivalent; replay
+  of a prefix reproduces recorded gate decisions verbatim with their
+  policy digests (asserted in `scripts/check`).
+- [x] verification.md records exact commands, results and remaining
   limits.
 
-Spec status: **Accepted** (2026-09-20) — implementation pending.
+Spec status: **Verified** (2026-09-20) — all implementation gates
+satisfied with real evidence. No M4 milestone or v1 acceptance is
+claimed from this spec alone; milestone gates belong to the design's
+M4 gate review.

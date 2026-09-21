@@ -7,7 +7,8 @@
    identities, no live credentials."
   (:require [clojure.test :refer [deftest is testing]]
             [axiom.capability :as cap]
-            [axiom.gate :as gate]))
+            [axiom.gate :as gate]
+            [axiom.ledger :as ledger]))
 
 ;; ------------------------------------------------------------------
 ;; Synthetic fixture builders (invented identities only)
@@ -171,15 +172,23 @@
 
 (deftest admin-bypass-event-shape
   (let [e (cap/admin-bypass-event {:bypass/actor "synth-owner"
-                                   :bypass/reason "emergency hotfix"
-                                   :bypass/target {:candidate/repo "synth-org/synth-repo"
-                                                   :candidate/pr 7}})]
-    (is (= :governance/admin-bypass (:governance/kind e)))
-    (is (= "synth-owner" (:bypass/actor e)))
-    (is (= "emergency hotfix" (:bypass/reason e))))
+                                   :bypass/reason "emergency hotfix"})]
+    (is (= :governance/admin-bypass (:event/kind e)))
+    (is (= "synth-owner" (:governance/actor e)))
+    (is (= "emergency hotfix" (:governance/reason e)))
+    ;; The constructed event is exactly what the ledger validates,
+    ;; so it can be recorded verbatim.
+    (let [env (ledger/record-governance
+               nil {:event/id "evt-synth-bypass-1"
+                    :stream/id "governance" :dedup/key "bypass-1"
+                    :producer "synth-owner"
+                    :observed/time 1 :ingested/time 2
+                    :governance-event (assoc e :event/id "evt-synth-bypass-1")})]
+      (is (= (assoc e :event/id "evt-synth-bypass-1")
+             (get-in env [:payload :governance/event]))))
   (testing "actor and reason are both required"
     (is (invalid? #(cap/admin-bypass-event {:bypass/actor "" :bypass/reason "r"})))
-    (is (invalid? #(cap/admin-bypass-event {:bypass/actor "a" :bypass/reason nil})))))
+    (is (invalid? #(cap/admin-bypass-event {:bypass/actor "a" :bypass/reason nil}))))))
 
 (deftest report-bypassed-outcome
   (let [bypass (cap/admin-bypass-event {:bypass/actor "synth-owner"

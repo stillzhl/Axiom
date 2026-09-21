@@ -15,7 +15,9 @@
             [axiom.policy-test]
             [axiom.gate-ledger-test]
             [axiom.checks-test]
-            [axiom.capability-test]))
+            [axiom.capability-test]
+            [axiom.gate-cli-test]
+            [axiom.gate-adversarial-test]))
 
 (defn -main [& _]
   (let [{:keys [fail error]} (test/run-tests 'axiom.kernel-test
@@ -33,6 +35,8 @@
                                              'axiom.policy-test
                                              'axiom.gate-ledger-test
                                              'axiom.checks-test
-                                             'axiom.capability-test)]
+                                             'axiom.capability-test
+                                             'axiom.gate-cli-test
+                                             'axiom.gate-adversarial-test)]
     (shutdown-agents)
     (System/exit (if (zero? (+ fail error)) 0 1))))

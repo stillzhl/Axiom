@@ -54,7 +54,11 @@ gh_check=$(mktemp /tmp/axiom-gh-check-XXXXXX.edn)
 gh_ledger=$(mktemp /tmp/axiom-gh-ledger-XXXXXX.db)
 gh_seed_log=$(mktemp /tmp/axiom-gh-seed-XXXXXX.log)
 gh_replay_out=$(mktemp /tmp/axiom-gh-replay-XXXXXX.edn)
-trap 'rm -rf "$ledger_db" "$ledger_db-wal" "$ledger_db-shm" "$bundle_file" "$tampered_bundle" "$replay_out" "$ledger_tmp" "$git_repo" "$artifact_file" "$obs_ledger" "$obs_ledger-wal" "$obs_ledger-shm" "$obs_seed_log" "$obs_replay_out" "$obs_a" "$obs_b" "$plain_dir" "$gh_obs" "$gh_obs_fail" "$gh_check" "$gh_ledger" "$gh_ledger-wal" "$gh_ledger-shm" "$gh_seed_log" "$gh_replay_out"' EXIT
+gate_out=$(mktemp /tmp/axiom-gate-XXXXXX.edn)
+gate_ledger=$(mktemp /tmp/axiom-gate-ledger-XXXXXX.db)
+gate_replay_out=$(mktemp /tmp/axiom-gate-replay-XXXXXX.edn)
+gate_policy_out=$(mktemp /tmp/axiom-gate-policy-XXXXXX.edn)
+trap 'rm -rf "$ledger_db" "$ledger_db-wal" "$ledger_db-shm" "$bundle_file" "$tampered_bundle" "$replay_out" "$ledger_tmp" "$git_repo" "$artifact_file" "$obs_ledger" "$obs_ledger-wal" "$obs_ledger-shm" "$obs_seed_log" "$obs_replay_out" "$obs_a" "$obs_b" "$plain_dir" "$gh_obs" "$gh_obs_fail" "$gh_check" "$gh_ledger" "$gh_ledger-wal" "$gh_ledger-shm" "$gh_seed_log" "$gh_replay_out" "$gate_out" "$gate_ledger" "$gate_ledger-wal" "$gate_ledger-shm" "$gate_replay_out" "$gate_policy_out"' EXIT
 LEDGER_DB="$ledger_db" ./scripts/clj -e '
 (require (quote [axiom.store :as store]) (quote [axiom.ledger :as ledger]) (quote [axiom.contract :as contract]))
 (defn load-scenario [name]
@@ -369,5 +373,140 @@ grep -Fq "$gh_seed_head" "$gh_replay_out" \
   || { printf 'replay: recorded observation head SHA missing\n' >&2; exit 1; }
 grep -Fq "$gh_seed_evt" "$gh_replay_out" \
   || { printf 'replay: recorded observation event id missing\n' >&2; exit 1; }
-printf 'replay: GitHub observation recorded with exact SHAs and trust marks (expected)\n'
-printf '0004 gates: all green, no network touched\n'
+printf 'replay: GitHub observation recorded with exact SHAs and trust marks (expected)\\n'
+printf '0004 gates: all green, no network touched\\n'
+
+# Spec 0005 gates: the enforced-gate CLI through the
+# AXIOM_GATE_FIXTURES hook (synthetic fixtures, fake Checks API, no
+# network). gate allow/defer/deny on the synthetic PRs, exit
+# contracts (invalid input -> 4, operational failure -> 5),
+# advisory publish-check with zero provider writes and ledger
+# recording, enforcement publish-check through the fake with ledger
+# replay, and policy-approve with supersession.
+printf 'running the 0005 enforced-gate CLI gates (synthetic fixtures, no network)\\n'
+gate_fixtures="examples/synthetic-gate/fixtures-advisory.edn"
+gate_enforce_fixtures="examples/synthetic-gate/fixtures-enforcement.edn"
+AXIOM_GATE_FIXTURES="$gate_fixtures" \
+  ./scripts/clj -m axiom.cli gate --repo synth-org/synth-repo --pr 7 > "$gate_out"
+printf 'gate pr 7: exit 0 (expected)\\n'
+grep -q ':gate/decision :allow' "$gate_out" \
+  || { printf 'gate pr 7: expected :gate/decision :allow\\n' >&2; exit 1; }
+AXIOM_GATE_FIXTURES="$gate_fixtures" \
+  ./scripts/clj -m axiom.cli gate --repo synth-org/synth-repo --pr 9 > "$gate_out"
+grep -q ':gate/decision :defer' "$gate_out" \
+  || { printf 'gate pr 9: expected :gate/decision :defer\\n' >&2; exit 1; }
+grep -q ':no-matching-check-run' "$gate_out" \
+  || { printf 'gate pr 9: expected the omitted-verification reason\\n' >&2; exit 1; }
+AXIOM_GATE_FIXTURES="$gate_fixtures" \
+  ./scripts/clj -m axiom.cli gate --repo synth-org/synth-repo --pr 10 > "$gate_out"
+grep -q ':gate/decision :deny' "$gate_out" \
+  || { printf 'gate pr 10: expected :gate/decision :deny\\n' >&2; exit 1; }
+grep -q ':stale-check-run' "$gate_out" \
+  || { printf 'gate pr 10: expected the stale-success reason\\n' >&2; exit 1; }
+printf 'gate: allow/defer/deny on synthetic PRs 7/9/10 with named reasons (expected)\\n'
+
+# 0005 exit contracts: invalid input -> 4.
+actual=0; AXIOM_GATE_FIXTURES="$gate_fixtures" \
+  ./scripts/clj -m axiom.cli gate --repo not-a-slug --pr 7 >/dev/null 2>&1 || actual=$?
+test "$actual" -eq 4 \
+  || { printf 'gate bad slug: expected exit 4, got %s\\n' "$actual" >&2; exit 1; }
+actual=0; AXIOM_GATE_FIXTURES="$gate_fixtures" \
+  ./scripts/clj -m axiom.cli gate --repo synth-org/synth-repo --pr 99 >/dev/null 2>&1 || actual=$?
+test "$actual" -eq 4 \
+  || { printf 'gate unknown PR: expected exit 4, got %s\\n' "$actual" >&2; exit 1; }
+actual=0; AXIOM_GATE_FIXTURES="$gate_fixtures" \
+  ./scripts/clj -m axiom.cli gate --repo synth-org/synth-repo --pr 7 --policy not-a-digest >/dev/null 2>&1 || actual=$?
+test "$actual" -eq 4 \
+  || { printf 'gate malformed digest: expected exit 4, got %s\\n' "$actual" >&2; exit 1; }
+actual=0; AXIOM_GATE_FIXTURES="$gate_fixtures" \
+  ./scripts/clj -m axiom.cli gate --repo synth-org/synth-repo --pr 7 \
+    --policy "sha256:$(printf 'b%.0s' {1..64})" >/dev/null 2>&1 || actual=$?
+test "$actual" -eq 4 \
+  || { printf 'gate unsatisfiable digest pin: expected exit 4, got %s\\n' "$actual" >&2; exit 1; }
+printf '0005 exits: 4 on invalid input (expected)\\n'
+
+# Operational failure -> 5: no observation source configured.
+actual=0; env -u AXIOM_GATE_FIXTURES \
+  ./scripts/clj -m axiom.cli gate --repo synth-org/synth-repo --pr 7 >/dev/null 2>&1 || actual=$?
+test "$actual" -eq 5 \
+  || { printf 'gate without fixtures: expected exit 5, got %s\\n' "$actual" >&2; exit 1; }
+printf '0005 exits: 5 when no observation source is configured (expected)\\n'
+
+# Advisory publish-check: zero provider writes, no enforcement claim,
+# and the evaluation is recorded in the ledger with no publication
+# reference (R8/R9).
+AXIOM_GATE_FIXTURES="$gate_fixtures" \
+  ./scripts/clj -m axiom.cli publish-check --repo synth-org/synth-repo --pr 7 \
+    --ledger "$gate_ledger" > "$gate_out"
+printf 'publish-check (advisory): exit 0 (expected)\\n'
+grep -q ':report/mode :advisory' "$gate_out" \
+  || { printf 'publish-check: expected advisory mode\\n' >&2; exit 1; }
+grep -q ':report/provider-writes 0' "$gate_out" \
+  || { printf 'publish-check: expected zero provider writes\\n' >&2; exit 1; }
+grep -q ':report/enforcement-claimed false' "$gate_out" \
+  || { printf 'publish-check: expected no enforcement claim\\n' >&2; exit 1; }
+grep -q ':checks/create-run' "$gate_out" \
+  && { printf 'publish-check advisory: unexpected provider write\\n' >&2; exit 1; }
+printf 'publish-check: advisory report, zero writes, no enforcement claim (expected)\\n'
+./scripts/clj -m axiom.cli replay --ledger "$gate_ledger" > "$gate_replay_out"
+grep -q ':gate-decisions' "$gate_replay_out" \
+  || { printf 'replay: expected the recorded advisory gate evaluation\\n' >&2; exit 1; }
+grep -q ':gate/decision :allow' "$gate_replay_out" \
+  || { printf 'replay: expected the recorded :allow decision\\n' >&2; exit 1; }
+grep -q ':reproduced? true' "$gate_replay_out" \
+  || { printf 'replay: expected the reproduced decision\\n' >&2; exit 1; }
+printf 'replay: advisory evaluation recorded in the ledger (expected)\\n'
+
+# Enforcement publish-check through the fake Checks API: the run is
+# created (fake), the decision is recorded with its evaluator-bound
+# publication reference, and replay reproduces it.
+rm -f "$gate_ledger" "$gate_ledger-wal" "$gate_ledger-shm"
+AXIOM_GATE_FIXTURES="$gate_enforce_fixtures" \
+  ./scripts/clj -m axiom.cli publish-check --repo synth-org/synth-repo --pr 7 \
+    --ledger "$gate_ledger" > "$gate_out"
+printf 'publish-check (enforcement): exit 0 (expected)\\n'
+grep -q ':publish/api :fake-checks-api' "$gate_out" \
+  || { printf 'publish-check: expected the fake Checks API\\n' >&2; exit 1; }
+grep -q ':checks/mode :created' "$gate_out" \
+  || { printf 'publish-check: expected a created check run\\n' >&2; exit 1; }
+grep -q ':checks/external-id "axiom-gate/' "$gate_out" \
+  || { printf 'publish-check: expected the axiom-gate external id\\n' >&2; exit 1; }
+./scripts/clj -m axiom.cli replay --ledger "$gate_ledger" > "$gate_replay_out"
+grep -q ':gate/decision :allow' "$gate_replay_out" \
+  || { printf 'replay: expected the recorded :allow decision\\n' >&2; exit 1; }
+grep -q ':reproduced? true' "$gate_replay_out" \
+  || { printf 'replay: expected the reproduced decision\\n' >&2; exit 1; }
+GATE_DB="$gate_ledger" ./scripts/clj -e '
+(require (quote [axiom.store :as store]))
+(let [handle (store/open! (System/getenv "GATE_DB") {:create false :migrate false})]
+  (try
+    (let [payloads (map :payload (store/read-range handle 0 0))
+          pub (:decision/publication (first payloads))]
+      (assert (= "synth-evaluator" (:publication/evaluator pub))
+              "expected the evaluator-bound publication reference")
+      (assert (some? (:publication/run-id pub)) "expected a run id")
+      (println "publication reference bound to synth-evaluator"))
+    (finally (store/close! handle))))' > "$gate_policy_out"
+grep -q 'publication reference bound to synth-evaluator' "$gate_policy_out" \
+  || { printf 'ledger: expected the evaluator-bound publication reference\\n' >&2; exit 1; }
+printf 'publish-check: fake publication recorded with evaluator-bound reference (expected)\\n'
+
+# policy-approve: v1 approved, v2 supersedes v1, replay shows both
+# governance events in order.
+AXIOM_GATE_FIXTURES="$gate_fixtures" \
+  ./scripts/clj -m axiom.cli policy-approve \
+    --policy examples/synthetic-gate/policy-approve-v1.edn \
+    --approver synth-owner --ledger "$gate_ledger" > "$gate_policy_out"
+printf 'policy-approve v1: exit 0 (expected)\\n'
+AXIOM_GATE_FIXTURES="$gate_fixtures" \
+  ./scripts/clj -m axiom.cli policy-approve \
+    --policy examples/synthetic-gate/policy-approve-v2.edn \
+    --approver synth-owner --ledger "$gate_ledger" > "$gate_policy_out"
+grep -q ':governance/supersedes "sha256:' "$gate_policy_out" \
+  || { printf 'policy-approve v2: expected the v1 supersedes digest\\n' >&2; exit 1; }
+printf 'policy-approve: v1 approved, v2 supersedes v1 (expected)\\n'
+./scripts/clj -m axiom.cli replay --ledger "$gate_ledger" > "$gate_replay_out"
+test "$(grep -o ':event/id "policy-approve-[0-9a-f]*"' "$gate_replay_out" | sort -u | wc -l)" -eq 2 \
+  || { printf 'replay: expected 2 distinct policy-approved governance events\\n' >&2; exit 1; }
+printf 'replay: both policy approvals recorded (expected)\\n'
+printf '0005 gates: all green, no network touched\\n'

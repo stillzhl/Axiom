@@ -1,12 +1,16 @@
 (ns axiom.cli
-  (:require [axiom.adapters.git :as git-adapter]
+  (:require [axiom.adapters.checks :as checks-adapter]
+            [axiom.adapters.git :as git-adapter]
             [axiom.adapters.github :as github-adapter]
             [axiom.adapters.runner :as runner-adapter]
+            [axiom.capability :as capability]
             [axiom.contract :as contract]
+            [axiom.gate :as gate]
             [axiom.github :as github]
             [axiom.ledger :as ledger]
             [axiom.model :as model]
             [axiom.nomos :as nomos]
+            [axiom.policy :as policy]
             [axiom.store :as store]
             [clojure.java.io :as io]
             [clojure.string :as str])
@@ -396,6 +400,422 @@
           {:exit 0 :output (github/check-pr observation default-check-pr-gates)}
           {:exit 5 :output observation})))))
 
+;; ------------------------------------------------------------------
+;; Spec 0005 commands: gate / publish-check / policy-approve (T6)
+
+(defn- usage-0005
+  "Usage for the 0005 enforced-gate commands. Kept separate from
+   `usage` so the 0001/0002 usage text stays byte-identical."
+  []
+  {:exit 4 :output {:error :usage
+                    :message (str "axiom gate --repo OWNER/NAME --pr N [--policy DIGEST]"
+                                  " | axiom publish-check --repo OWNER/NAME --pr N [--ledger PATH]"
+                                  " | axiom policy-approve --policy PATH --approver ID [--ledger PATH]")}})
+
+(defn- non-blank-string? [x]
+  (and (string? x) (not (str/blank? x))))
+
+(defn- positive-int? [x]
+  (and (integer? x) (pos? x)))
+
+(defn- sha256-digest?
+  "A sha256:<64 hex> content digest."
+  [x]
+  (and (string? x) (boolean (re-matches #"sha256:[0-9a-f]{64}" x))))
+
+(defn- gate-fixture-fn
+  "Fixture-mode hook for the 0005 commands, following the
+   AXIOM_GITHUB_FIXTURES pattern: when AXIOM_GATE_FIXTURES names an
+   EDN fixture file (candidate observations keyed by repo slug and PR
+   number, the approved-policy content, the policy approval, the
+   evaluator identity and the R8 capability record), returns the
+   parsed fixture map; nil otherwise. `scripts/check` drives the
+   0005 gates through it with synthetic fixtures and the fake Checks
+   API: zero network. Live provider wiring for observations and
+   policy sources is deployment-specific and is not implemented in
+   this slice: without the hook the 0005 commands report an
+   operational failure naming what is missing."
+  []
+  (when-let [path (System/getenv "AXIOM_GATE_FIXTURES")]
+    (read-input path)))
+
+(defn- gate-fixtures!
+  "Loads the fixture map for the 0005 commands. A missing hook or a
+   malformed fixture shape is operational (5): the deployment has no
+   observation source configured."
+  []
+  (let [fixtures (gate-fixture-fn)]
+    (when (nil? fixtures)
+      (throw (ex-info "No gate observation source configured: set AXIOM_GATE_FIXTURES to a fixture file (live provider wiring is deployment-specific)"
+                      {:axiom/error :operational})))
+    (when-not (and (map? fixtures)
+                   (non-blank-string? (:fixture/evaluator-id fixtures))
+                   (map? (:fixture/policy-content fixtures))
+                   (map? (:fixture/capability fixtures))
+                   (map? (:fixture/observations fixtures)))
+      (throw (ex-info "AXIOM_GATE_FIXTURES names a malformed fixture map"
+                      {:axiom/error :operational})))
+    fixtures))
+
+(defn- fixture-approval-events
+  "Builds the recorded `:governance/policy-approved` event for the
+   fixture policy content from the fixture's approval descriptor
+   (`:fixture/policy-approval`), using the same constructor the
+   `policy-approve` command uses. The digest is pinned over the
+   canonical EDN encoding, never hand-written."
+  [fixtures]
+  (let [content (:fixture/policy-content fixtures)
+        approval (:fixture/policy-approval fixtures)]
+    (if (nil? approval)
+      []
+      [(policy/policy-approve-event
+        content
+        (:approver approval)
+        {:event-id (:event-id approval)
+         :policy-id (:policy/id content)
+         :approved-at (:approved-at approval)})])))
+
+(defn- gate-ledger-env
+  "The AXIOM_GATE_LEDGER fallback for governance-ledger commands."
+  []
+  (System/getenv "AXIOM_GATE_LEDGER"))
+
+(defn- gate-cli-args!
+  "Shared argument handling for `gate` and `publish-check`: parses
+   the flag pairs (allowed set varies per command) and validates the
+   repo slug, PR number and policy-digest shapes. Returns
+   [slug pr digest ledger-path]; malformed flags return the usage map
+   (exit 4); invalid values throw :invalid (exit 4)."
+  [operands allowed]
+  (let [opts (parse-flag-pairs operands allowed)]
+    (if (and opts (get opts "--repo") (get opts "--pr"))
+      (let [[owner repo] (parse-repo-slug (get opts "--repo"))]
+        (when (nil? owner)
+          (model/invalid! "Malformed --repo slug; expected OWNER/NAME" {:repo (get opts "--repo")}))
+        (let [pr (parse-pr-number (get opts "--pr"))
+              digest (get opts "--policy")]
+          (when (and (some? digest) (not (sha256-digest? digest)))
+            (model/invalid! "Invalid --policy digest; expected sha256:<64 hex>" {:policy digest}))
+          [(str owner "/" repo) pr digest (or (get opts "--ledger") (gate-ledger-env))]))
+      (usage-0005))))
+
+(defn- gate-observation!
+  "Looks up the candidate observation for (repo slug, pr) in the
+   fixtures. An unknown PR is invalid input (exit 4)."
+  [fixtures slug pr]
+  (let [observation (get-in fixtures [:fixture/observations slug pr])]
+    (when (nil? observation)
+      (model/invalid! "Unknown PR for the configured gate fixtures" {:repo slug :pr pr}))
+    observation))
+
+(defn- candidate-identity
+  "The exact candidate identity echoed into deferred decisions, built
+   from the observation's validated identity fields; nil when the
+   fixture observation is malformed."
+  [observation]
+  (let [repo (:observation/repo observation)
+        pr (:observation/pr observation)
+        base (:observation/base observation)
+        head (:observation/head observation)
+        tree (:observation/tree observation)]
+    (when (and (non-blank-string? repo) (positive-int? pr)
+               (sha40? base) (sha40? head) (sha40? tree))
+      {:candidate/repo repo :candidate/pr pr
+       :candidate/base base :candidate/head head
+       :candidate/tree tree})))
+
+(defn- resolve-gate-policy
+  "Resolves the fixture policy content against the fixture
+   governance events (`axiom.policy/resolve`). Returns the policy
+   map for `axiom.gate/evaluate`, `{:deferred resolution}` when the
+   digest has no approval event, or `{:invalid resolution}` when the
+   source is structurally refused. A requested digest that does not
+   match the deployment's configured policy content is invalid input
+   (4): the caller named a policy the deployment does not have, and
+   the gate never evaluates content it was not configured with."
+  [fixtures requested-digest]
+  (let [content (:fixture/policy-content fixtures)
+        source (or (:fixture/policy-source fixtures)
+                   {:source/type :pinned-path
+                    :source/policy-id (:policy/id content)})
+        computed (policy/content-digest content)]
+    (when (and (some? requested-digest) (not= requested-digest computed))
+      (model/invalid! "The requested --policy digest does not match the deployment's configured policy content"
+                      {:requested requested-digest :configured computed}))
+    (let [resolution (policy/resolve source content
+                                     (fixture-approval-events fixtures)
+                                     nil)]
+      (case (:policy/resolution resolution)
+        :ok {:policy/id (:policy/id resolution)
+             :policy/digest (:policy/digest resolution)
+             :policy/approval-event-id (:policy/approval-event-id resolution)
+             :policy/gates (get-in resolution [:policy/content :policy/gates])
+             :policy/reserved-paths (get-in resolution [:policy/content :policy/reserved-paths])}
+        :deferred {:deferred resolution}
+        {:invalid resolution}))))
+
+(defn- evaluate-candidate!
+  "Pure evaluation of one candidate observation against the resolved
+   approved policy. Returns the gate decision map, which may be
+   :allow/:deny/:defer/:invalid — never allow on malformed input."
+  [fixtures slug pr requested-digest]
+  (let [observation (gate-observation! fixtures slug pr)
+        evaluator-id (:fixture/evaluator-id fixtures)
+        capability (:fixture/capability fixtures)
+        policy-or (resolve-gate-policy fixtures requested-digest)]
+    (cond
+      (:deferred policy-or)
+      (let [candidate (candidate-identity observation)]
+        (when (nil? candidate)
+          (throw (ex-info "Configured gate fixture observation is malformed"
+                          {:axiom/error :operational :repo slug :pr pr})))
+        ;; Unapproved digests make every dependent gate :defer with
+        ;; the named reason (R1) — a valid report, never allow.
+        (gate/decision-for-unresolved (:deferred policy-or) candidate evaluator-id))
+
+      (:invalid policy-or)
+      (throw (ex-info "Configured gate policy source is structurally refused"
+                      {:axiom/error :operational
+                       :reason (:policy/reason (:invalid policy-or))}))
+
+      :else
+      (gate/evaluate policy-or observation evaluator-id capability))))
+
+(defn- gate!
+  "Thin evaluation over `axiom.gate/evaluate`: pure — it never
+   constructs the checks adapter and never mutates provider state
+   (the report carries no `:checks/` keys by construction). Exit 0
+   on a valid report (allow/deny/defer with named reasons); 4 on
+   invalid input; 5 when the deployment has no observation source or
+   the evaluation is :invalid."
+  [operands]
+  (let [parsed (gate-cli-args! operands #{"--repo" "--pr" "--policy"})]
+    (if (map? parsed)
+      parsed
+      (let [[slug pr digest _ledger] parsed
+            decision (evaluate-candidate! (gate-fixtures!) slug pr digest)]
+        (if (= :invalid (:gate/decision decision))
+          {:exit 5 :output decision}
+          {:exit 0 :output decision})))))
+
+(defn- ledger-head-envelope
+  "The ledger's current head envelope (for the 0002 append path), or
+   nil for an empty ledger."
+  [handle]
+  (when-let [h (store/head handle)]
+    (first (store/read-range handle (:seq h) (:seq h)))))
+
+(defn- ledger-governance-events
+  "All recorded `:governance/*` events in the ledger, in sequence
+   order."
+  [handle]
+  (let [n (:event/count (store/ledger-identity handle))]
+    (if (zero? n)
+      []
+      (into []
+            (comp (filter #(= :governance (get-in % [:payload :record/kind])))
+                  (map #(get-in % [:payload :governance/event])))
+            (store/read-range handle 0 (dec n))))))
+
+(defn- record-gate-decision!
+  "Appends the gate decision with its evaluator-bound publication
+   reference through the 0002 append path (R9). Returns the recording
+   receipt. In advisory mode there is no provider publication, so the
+   publication reference is nil and the receipt says so: the
+   evaluation is still recorded (R8/R9). A missing ledger path means
+   the deployment records elsewhere: the report says so honestly
+   instead of inventing a location."
+  [ledger-path decision published evaluator-id]
+  (when (some? ledger-path)
+    (let [handle (store/open! ledger-path {:create true})]
+      (try
+        (let [now (System/currentTimeMillis)
+              external-id (:checks/external-id published)
+              event-id (if (some? external-id)
+                         (str "gate-publish-" (subs ^String external-id 11 27) "-" now)
+                         (str "gate-advisory-" now))
+              publication (when (some? published)
+                            {:publication/evaluator evaluator-id
+                             :publication/run-id (:checks/run-id published)
+                             :publication/published-at now})
+              envelope (ledger/record-gate-decision
+                        (ledger-head-envelope handle)
+                        {:event/id event-id
+                         :stream/id "gate"
+                         :dedup/key event-id
+                         :producer evaluator-id
+                         :observed/time now
+                         :ingested/time now
+                         :decision decision
+                         :publication publication})
+              stored (store/append! handle envelope)]
+          {:recorded? true :event/id event-id :event/seq (:seq stored)
+           :publication? (some? publication)})
+        (finally (store/close! handle))))))
+
+(defn- publish-check!
+  "The only command that may mutate provider state (R10/R11): it
+   runs the R8 capability check first, then publishes the evaluation
+   through `axiom.adapters.checks`.
+
+   In this slice the checks API is the in-memory fake in fixture
+   mode (zero network; live provider wiring is deployment-specific
+   and deferred): the report names `:publish/api :fake-checks-api`
+   honestly. In advisory mode the adapter is never constructed —
+   the report says advisory mode explicitly, performs zero provider
+   writes (`:report/provider-writes 0`), claims no enforcement, and
+   still records the evaluation in the ledger with no publication
+   reference (R8/R9).
+
+   Exit 0 on a valid report (publication or advisory); 4 on invalid
+   input; 5 on operational failure (API error, incomplete
+   observation, missing policy approval, capability check failure)."
+  [operands]
+  (let [parsed (gate-cli-args! operands #{"--repo" "--pr" "--ledger"})]
+    (if (map? parsed)
+      parsed
+      (let [[slug pr _digest ledger-path] parsed
+            fixtures (gate-fixtures!)
+            evaluator-id (:fixture/evaluator-id fixtures)
+            capability (:fixture/capability fixtures)]
+        (when-not (and (map? capability)
+                       (contains? #{:enforcement :advisory} (:capability/mode capability))
+                       (non-blank-string? (:capability/trusted-evaluator capability)))
+          (throw (ex-info "Configured capability record is malformed"
+                          {:axiom/error :operational})))
+        (let [decision (evaluate-candidate! fixtures slug pr nil)]
+          (cond
+            ;; A decision that cannot name its policy approval cannot
+            ;; be published (R2): the publication would not be pinned.
+            (nil? (get-in decision [:gate/policy :policy/approval-event-id]))
+            (throw (ex-info "Missing policy approval: publish-check cannot publish a decision that names no policy approval"
+                            {:axiom/error :operational :repo slug :pr pr}))
+
+            (= :invalid (:gate/decision decision))
+            (throw (ex-info "Cannot publish an :invalid gate decision"
+                            {:axiom/error :operational :repo slug :pr pr}))
+
+            (capability/advisory? capability)
+            ;; Advisory mode: the evaluation is produced and recorded
+            ;; locally (R8/R9); the checks adapter is never
+            ;; constructed, so zero provider writes happen by
+            ;; construction. The recording carries no publication
+            ;; reference — there was no publication.
+            (let [receipt (record-gate-decision! ledger-path decision nil evaluator-id)]
+              {:exit 0
+               :output (cond-> (assoc (capability/advisory-report capability decision)
+                                      :report/command "publish-check")
+                         (some? receipt) (assoc :report/ledger receipt)
+                         (nil? receipt) (assoc :report/ledger
+                                               {:recorded? false
+                                                :reason "no ledger configured: pass --ledger PATH"}))})
+
+            :else
+            (let [[owner repo] (str/split ^String (:candidate/repo (:gate/candidate decision)) #"/" 2)
+                  fake (checks-adapter/fake-checks-api)
+                  adapter (checks-adapter/construct!
+                           {:capability capability
+                            :evaluator/id evaluator-id
+                            :checks/owner owner
+                            :checks/repo repo
+                            :checks/api (:checks/api fake)})
+                  published (checks-adapter/publish!
+                             adapter decision (:gate/candidate decision))
+                  receipt (record-gate-decision! ledger-path decision published evaluator-id)]
+              {:exit 0
+               :output (cond-> {:publish/command "publish-check"
+                                :publish/api :fake-checks-api
+                                :publish/evaluation decision
+                                :publish/result published
+                                :publish/attempts @(:checks/attempts fake)}
+                         (some? receipt) (assoc :publish/ledger receipt)
+                         (nil? receipt) (assoc :publish/ledger
+                                               {:recorded? false
+                                                :reason "no ledger configured: pass --ledger PATH or set AXIOM_GATE_LEDGER"}))})))))))
+
+(defn- read-policy-file!
+  "Reads the policy file for `policy-approve`. An unreadable file or
+   malformed EDN is invalid input (4)."
+  [path]
+  (try
+    (read-input path)
+    (catch java.io.IOException _
+      (model/invalid! "Cannot read policy file" {:path path}))))
+
+(defn- latest-approval-for-policy
+  "The latest recorded `:governance/policy-approved` event for the
+   policy id, or nil — its digest becomes the new approval's
+   `:governance/supersedes`."
+  [events policy-id]
+  (->> events
+       (filter #(and (= :governance/policy-approved (:event/kind %))
+                     (= policy-id (:governance/policy-id %))))
+       (sort-by :governance/approved-at)
+       last))
+
+(defn- policy-approve!
+  "Records a `:governance/policy-approved` event in the ledger (R2):
+   a governance action, distinct from candidate evaluation. Carries
+   the approver (authorizer) identity, the SHA-256 content digest of
+   the policy file, and the superseded digest when the ledger
+   already holds an approval for the same policy id. Exit 0 on a
+   recorded approval; 4 on invalid input (unreadable policy file,
+   malformed policy, missing approver or ledger); 5 on operational
+   failure (append failure, duplicate approval of the same digest)."
+  [operands]
+  (let [opts (parse-flag-pairs operands #{"--policy" "--approver" "--ledger"})]
+    (if (and opts (get opts "--policy") (get opts "--approver")
+             (non-blank-string? (get opts "--approver")))
+      (let [policy-path (get opts "--policy")
+            approver (get opts "--approver")
+            ledger-path (or (get opts "--ledger") (gate-ledger-env))]
+        (when (nil? ledger-path)
+          (throw (ex-info "No governance ledger configured: pass --ledger PATH or set AXIOM_GATE_LEDGER"
+                          {:axiom/error :operational})))
+        (let [content (read-policy-file! policy-path)]
+          (when-not (map? content)
+            (model/invalid! "Policy file must contain a policy content map" {:path policy-path}))
+          (let [policy-id (:policy/id content)]
+            (when-not (non-blank-string? policy-id)
+              (model/invalid! "Policy file must carry a non-blank :policy/id" {:path policy-path}))
+            (let [handle (store/open! ledger-path {:create true})]
+              (try
+                (let [now (System/currentTimeMillis)
+                      digest (policy/content-digest content)
+                      supersedes (:governance/digest
+                                  (latest-approval-for-policy
+                                   (ledger-governance-events handle) policy-id))
+                      event-id (str "policy-approve-" (subs ^String digest 7 23))
+                      event (policy/policy-approve-event
+                             content approver
+                             {:event-id event-id :policy-id policy-id
+                              :supersedes supersedes :approved-at now})
+                      envelope (ledger/record-governance
+                                (ledger-head-envelope handle)
+                                {:governance-event event
+                                 :event/id event-id
+                                 :stream/id "governance"
+                                 :dedup/key event-id
+                                 :producer approver
+                                 :observed/time now
+                                 :ingested/time now})]
+                  (try
+                    (let [stored (store/append! handle envelope)]
+                      {:exit 0
+                       :output {:approved? true
+                                :governance/event event
+                                :event/id event-id
+                                :event/seq (:seq stored)
+                                :ledger ledger-path}})
+                    (catch clojure.lang.ExceptionInfo e
+                      (if (= :duplicate (:axiom/error (ex-data e)))
+                        (throw (ex-info (str "Policy digest already approved: " digest)
+                                        {:axiom/error :operational
+                                         :governance/digest digest}))
+                        (throw e)))))
+                (finally (store/close! handle)))))))
+      (usage-0005))))
+
 (defn run [args]
   (try
     (let [[command & operands] args]
@@ -449,6 +869,15 @@
 
         (= "check-pr" command)
         (check-pr! operands)
+
+        (= "gate" command)
+        (gate! operands)
+
+        (= "publish-check" command)
+        (publish-check! operands)
+
+        (= "policy-approve" command)
+        (policy-approve! operands)
 
         (= "digest" command)
         (digest-file! operands)

@@ -1,0 +1,84 @@
+;; Synthetic 0005 gate fixtures (advisory deployment): candidate
+;; observations keyed by repo slug and PR number, the approved-policy
+;; content, the policy approval (built at load time from the content),
+;; the evaluator identity and the R8 capability record. Every
+;; repository, SHA, login and workflow is invented (`synth-*`); no
+;; live credentials, no real repository identities, no network.
+{:fixture/evaluator-id "synth-evaluator"
+ :fixture/policy-source {:source/type :pinned-path
+                         :source/policy-id "synth-enforce-v1"}
+ :fixture/policy-content
+ {:policy/id "synth-enforce-v1"
+  :policy/reserved-paths ["policies/"]
+  :policy/gates
+  [{:gate/id :ci
+    :gate/check-run-id 9001
+    :gate/workflow-identity ".github/workflows/synth-ci.yml"
+    :gate/required true}
+   {:gate/id :lint
+    :gate/check-run-id 9002
+    :gate/workflow-identity ".github/workflows/synth-lint.yml"
+    :gate/required true}]}
+ :fixture/policy-approval {:approver "synth-owner"
+                           :event-id "evt-synth-approve-1"
+                           :approved-at 1750000000000}
+ :fixture/capability {:capability/mode :advisory
+                      :capability/trusted-evaluator "synth-evaluator"
+                      :capability/checks-write? false
+                      :capability/protection-readable? true
+                      :capability/protections-configurable? false
+                      :capability/advisory-reasons [:no-checks-write
+                                                    :protections-unconfigurable]}
+ :fixture/observations
+ {"synth-org/synth-repo"
+  {7 {:observation/repo "synth-org/synth-repo"
+ :observation/pr 7
+ :observation/base "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" :observation/head "cccccccccccccccccccccccccccccccccccccccc" :observation/tree "dddddddddddddddddddddddddddddddddddddddd"
+ :observation/changed-files ["src/synth.clj"]
+ :observation/check-runs [{:check/id 9001
+ :check/workflow-identity ".github/workflows/synth-ci.yml"
+ :check/title "synth-ci / build"
+ :check/conclusion :success
+ :check/base "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" :check/head "cccccccccccccccccccccccccccccccccccccccc"
+ :check/trust :trust/provider-authenticated}
+ {:check/id 9002
+ :check/workflow-identity ".github/workflows/synth-lint.yml"
+ :check/title "synth-lint / check"
+ :check/conclusion :success
+ :check/base "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" :check/head "cccccccccccccccccccccccccccccccccccccccc"
+ :check/trust :trust/provider-authenticated}]
+ :observation/current? true
+ :observation/synthetic-fixture? true
+ :observation/trust :trust/provider-authenticated}
+   9 {:observation/repo "synth-org/synth-repo"
+ :observation/pr 9
+ :observation/base "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" :observation/head "cccccccccccccccccccccccccccccccccccccccc" :observation/tree "dddddddddddddddddddddddddddddddddddddddd"
+ :observation/changed-files ["src/synth.clj"]
+ :observation/check-runs [{:check/id 9001
+ :check/workflow-identity ".github/workflows/synth-ci.yml"
+ :check/title "synth-ci / build"
+ :check/conclusion :success
+ :check/base "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" :check/head "cccccccccccccccccccccccccccccccccccccccc"
+ :check/trust :trust/provider-authenticated}]
+ :observation/current? true
+ :observation/synthetic-fixture? true
+ :observation/trust :trust/provider-authenticated}
+   10 {:observation/repo "synth-org/synth-repo"
+ :observation/pr 10
+ :observation/base "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" :observation/head "cccccccccccccccccccccccccccccccccccccccc" :observation/tree "dddddddddddddddddddddddddddddddddddddddd"
+ :observation/changed-files ["src/synth.clj"]
+ :observation/check-runs [{:check/id 9001
+ :check/workflow-identity ".github/workflows/synth-ci.yml"
+ :check/title "synth-ci / build"
+ :check/conclusion :success
+ :check/base "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" :check/head "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+ :check/trust :trust/provider-authenticated}
+ {:check/id 9002
+ :check/workflow-identity ".github/workflows/synth-lint.yml"
+ :check/title "synth-lint / check"
+ :check/conclusion :success
+ :check/base "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" :check/head "cccccccccccccccccccccccccccccccccccccccc"
+ :check/trust :trust/provider-authenticated}]
+ :observation/current? true
+ :observation/synthetic-fixture? true
+ :observation/trust :trust/provider-authenticated}}}}

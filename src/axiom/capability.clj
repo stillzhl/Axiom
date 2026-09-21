@@ -186,15 +186,19 @@
   "Builds the `:governance/admin-bypass` event shape (R6): observed
    where the provider API exposes admin bypasses, carrying the actor
    and the reason. Both are required — a bypass that cannot name its
-   actor and reason is malformed, never recorded."
-  [{:bypass/keys [actor reason target]}]
+   actor and reason is malformed, never recorded. The event is an
+   observation of a bypassing actor, not a governance approval, so
+   no separate owner authorizer is invented. The emitted shape is
+   exactly what `axiom.ledger` validates for
+   `:governance/admin-bypass` events, so a constructed event can be
+   recorded verbatim."
+  [{:bypass/keys [actor reason]}]
   (when-not (non-blank-string? actor)
     (invalid! "Admin bypass event requires a non-blank :bypass/actor"
               {:bypass/actor actor}))
   (when-not (non-blank-string? reason)
     (invalid! "Admin bypass event requires a non-blank :bypass/reason"
               {:bypass/reason reason}))
-  (cond-> {:governance/kind :governance/admin-bypass
-           :bypass/actor actor
-           :bypass/reason reason}
-    (some? target) (assoc :bypass/target target)))
+  {:event/kind :governance/admin-bypass
+   :governance/actor actor
+   :governance/reason reason})

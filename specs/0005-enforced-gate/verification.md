@@ -355,3 +355,118 @@ Honest limits:
   single-threaded fake path only.
 - Test evidence is bounded synthetic observation, not a formal
   proof and not a production trust attestation.
+
+## Final slice evidence — T6/T7/T8 implemented (2026-09-20)
+
+Branch `feat/0005-gate-cli-verify` (PR #25). This slice implements
+tasks T6 (CLI), T7 (adversarial and boundary tests) and T8
+(verification). Every implementation gate in this spec is now
+satisfied with real evidence; spec status is **Verified** by this
+record. No M4 milestone or v1 acceptance is claimed — milestone
+gates belong to the design's M4 gate review.
+
+T6 — CLI (`src/axiom/cli.clj`):
+- `gate --repo OWNER/NAME --pr N [--policy DIGEST]` evaluates the
+  candidate through the pure port with no provider mutation; exits
+  0/4/5 matching 0002–0004.
+- `publish-check` is the only provider-mutating command: it
+  capability-checks first, then publishes through the Checks API
+  fn-map (fake in fixtures mode). In advisory mode it performs
+  zero provider writes and says so explicitly
+  (`:report/provider-writes 0`, `:report/enforcement-claimed false`);
+  the evaluation is still recorded in the ledger when one is
+  configured (R8/R9), with no publication reference.
+- `policy-approve` records governance approval events in the
+  ledger, with supersession (v2 names v1's digest) and duplicate
+  rejection.
+- The offline hook is `AXIOM_GATE_FIXTURES` (synthetic fixtures,
+  fake Checks API, no network). No observation source configured
+  exits 5 (operational failure); malformed input — including a
+  well-formed `--policy` digest that does not match the configured
+  policy — exits 4 (invalid input). Gate evaluation is never
+  driven by candidate content: policy loading is pinned-path or
+  approved-event only.
+- Tests: `test/axiom/gate_cli_test.clj` (13 tests, incl. the
+  malformed/unsatisfiable digest exit-4 contract, the exit-5
+  missing-source contract, the R8/R9 advisory ledger recording,
+  and the evaluator-bound publication reference).
+
+T7 — adversarial and boundary tests
+(`test/axiom/gate_adversarial_test.clj`,
+`examples/synthetic-gate/adversarial-corpus.edn`):
+- 41 corpus cases, expectations authored independently of the
+  implementation, interpreted through the production namespaces
+  (`axiom.gate`, `axiom.capability`, `axiom.policy`) with
+  fake-only adapters. Classes: candidate policy relaxation (edit
+  + quarantine), renamed checks, omitted required verification,
+  stale success, verifier-config replacement, forged
+  `:trust/remote-ci`, forged producer claims on published runs,
+  duplicate publication, prompt/annotation override attempts,
+  quarantine violations (candidate bytes reaching policy
+  loading), capability check failures, admin-bypass handling,
+  and CLI contracts.
+- Every named bypass class is denied (never allowed) or deferred
+  with a named non-allow reason; no case that is actually a
+  bypass attempt yields `:allow`. Three cases were revised for
+  this discipline during review: the smuggled-relaxed-policy
+  quarantine case and the prompt-override case now omit one
+  required check so the approved policy yields defer (the attack
+  is still neutralized — candidate bytes ignored, prompt text
+  inert); the cosmetic display-title case was reclassified to
+  the non-bypass `:identity-boundary` class since the gate
+  correctly binds by check-run ID and the genuinely satisfying
+  run allows. A `bypass-classes-never-allow` test now
+  machine-checks the discipline: no `:gate`-layer case in a
+  bypass class may expect `:allow`.
+- Verifier-config mismatch and
+  protection-state changes mid-evaluation produce named
+  defer/deny results without approval.
+- No test opens a socket or requires live network; all
+  identities/fixtures are synthetic (`synth-*`).
+
+T8 — full verification:
+
+- `./scripts/check` (Temurin 17.0.20, Clojure 1.12.0),
+  run 2026-09-20 on `feat/0005-gate-cli-verify` before push:
+  **Ran 214 tests containing 2154 assertions. 0 failures,
+  0 errors.** `git diff --check` clean. (The count includes the
+  `bypass-classes-never-allow` discipline test added during
+  final review, plus the `AXIOM_GATE_LEDGER` env-fallback test.)
+- 0005 CLI probes added to `scripts/check` and all green on the
+  same run: `gate` allow/defer/deny on synthetic PRs 7/9/10 with
+  named reasons; exit 4 on invalid input (bad slug, unknown PR,
+  malformed digest, unsatisfiable well-formed digest pin); exit 5
+  with no observation source; advisory `publish-check` exit 0
+  with zero provider writes and no enforcement claim, evaluation
+  recorded in the ledger with no publication reference;
+  enforcement `publish-check` through the fake Checks API with
+  the evaluator-bound publication reference recorded in the
+  ledger (replayed and asserted); `policy-approve` v1/v2 with
+  supersession, both governance events replayed.
+- No live-network tests; no credentials; no HomeKV-specific
+  content; all fixtures synthetic.
+
+Corrections made in this slice (honest record):
+- `admin-bypass-event` initially emitted `:bypass/actor` /
+  `:bypass/reason`; corrected to the ledger-compatible
+  `:governance/actor` / `:governance/reason` on the
+  `:governance/admin-bypass` kind, and documented as an
+  observation of the bypassing actor — never an approval, and
+  never reported as allow.
+- A well-formed but mismatched `--policy` digest initially
+  exited 5; corrected to exit 4 via `model/invalid!` (it is
+  unsatisfiable input, not an operational failure).
+- Advisory evaluations are now recorded in the ledger when one
+  is configured, with no publication reference, rather than
+  silently unrecorded.
+- `:governance/policy-revoked` is retained as an
+  authorizer-governed event kind: a revoked digest resolves to
+  `:deferred` with reason `:policy-approval-revoked`, never to
+  allow (amendment recorded in requirements.md R2 and design.md).
+
+Honest limits (unchanged from earlier slices):
+- The real `github-checks-api` write path (HTTP create/update)
+  is implemented but exercised only through the in-memory
+  fake; this record claims nothing about live-provider behavior.
+- Test evidence is bounded synthetic observation, not a formal
+  proof and not a production trust attestation.

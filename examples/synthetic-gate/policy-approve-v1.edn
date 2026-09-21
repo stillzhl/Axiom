@@ -1,0 +1,10 @@
+;; Synthetic approved-policy content, revision 1: the policy the
+;; `policy-approve` check gates record an approval event for. All
+;; identities invented (`synth-*`).
+{:policy/id "synth-approve-policy"
+ :policy/reserved-paths ["policies/"]
+ :policy/gates
+ [{:gate/id :ci
+   :gate/check-run-id 9001
+   :gate/workflow-identity ".github/workflows/synth-ci.yml"
+   :gate/required true}]}
