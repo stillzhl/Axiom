@@ -313,7 +313,8 @@
   (doseq [t [:lease/acquired-at :lease/renewed-at :lease/released-at
              :lease/expired-at :lease/revoked-at :task/accepted-at
              :task/prepared-at :task/completed-at :task/blocked-at
-             :task/cancelled-at]]
+             :task/cancelled-at :outbox/recorded-at :outbox/executed-at
+             :outbox/failed-at :outbox/uncertain-at]]
     (when (contains? event t)
       (ensure! (non-negative-int? (get event t)) "Invalid task/lease timestamp"
                {:field t})))
@@ -497,6 +498,106 @@
   (validate-lease-event! (:lease/event payload))
   payload)
 
+;; ---------------------------------------------------------------------------
+;; Action outbox events (spec 0006 T4)
+;;
+;; New payload kind through the 0002 append path, additive to the
+;; existing schema (no DDL change, still schema v5): `:outbox` (an
+;; outbox event of one of the `:outbox/*` kinds). The 0002 invariants
+;; apply unchanged: transactional sequence, hash chain,
+;; event-id/dedup-key dedup, forward-only migrations, rebuildable
+;; snapshots. The outbox state is a pure fold over the `:outbox/*`
+;; events (see `axiom.execute/outbox-intents`); the single-writer
+;; discipline is the supervisor's, enforced by fencing-token and
+;; supervisor-identity checks in `axiom.execute/transition-intent`.
+
+(def outbox-event-kinds
+  "The `:outbox/*` event kinds this slice records (R7)."
+  #{:outbox/intent-recorded :outbox/executed :outbox/failed :outbox/uncertain})
+
+(def outbox-terminal-states
+  "Outbox states after which an intent is never re-driven under its
+   idempotency key."
+  #{:executed :failed})
+
+(defn- validate-outbox-event!
+  "Strict per-kind validation of an `:outbox/*` event map. Every kind
+   requires the idempotency key, the fencing token of the lease the
+   intent was recorded under, and the issuing evaluator (supervisor)
+   identity. `:outbox/intent-recorded` additionally requires the
+   task, the action keyword and the EDN payload map; the idempotency
+   key is `(task-id, action, payload-digest)` (see
+   `axiom.execute/outbox-idempotency-key`). Unknown or malformed
+   outbox events are :invalid and can never be written."
+  [event]
+  (ensure! (map? event) "Outbox record must carry an event map" {})
+  (let [kind (:event/kind event)]
+    (ensure! (contains? outbox-event-kinds kind)
+             "Unknown outbox event kind" {:event/kind kind})
+    (case kind
+      :outbox/intent-recorded
+      (do (event-shape! event kind
+                        #{:event/kind :outbox/idempotency-key :outbox/task-id
+                          :outbox/action :outbox/payload
+                          :outbox/fencing-token :outbox/issued-by}
+                        #{:event/kind :event/id :outbox/idempotency-key
+                          :outbox/task-id :outbox/action :outbox/payload
+                          :outbox/fencing-token :outbox/issued-by
+                          :outbox/recorded-at :outbox/attempt})
+          (ensure! (non-blank-string? (:outbox/idempotency-key event))
+                   "Outbox idempotency key must be a non-blank string" {})
+          (ensure! (non-blank-string? (:outbox/task-id event))
+                   "Outbox task id must be a non-blank string" {})
+          (ensure! (keyword? (:outbox/action event))
+                   "Outbox action must be a keyword" {:kind kind})
+          (ensure! (map? (:outbox/payload event))
+                   "Outbox payload must be a map" {:kind kind})
+          (ensure! (non-blank-string? (:outbox/fencing-token event))
+                   "Outbox event requires a fencing token" {:kind kind})
+          (ensure! (non-blank-string? (:outbox/issued-by event))
+                   "Outbox event requires an evaluator identity" {:kind kind})
+          (when (contains? event :outbox/attempt)
+            (ensure! (non-negative-int? (:outbox/attempt event))
+                     "Outbox attempt must be a non-negative integer" {})))
+
+      (:outbox/executed :outbox/failed :outbox/uncertain)
+      (do (event-shape! event kind
+                        #{:event/kind :outbox/idempotency-key
+                          :outbox/fencing-token :outbox/issued-by}
+                        #{:event/kind :event/id :outbox/idempotency-key
+                          :outbox/fencing-token :outbox/issued-by
+                          :outbox/executed-at :outbox/failed-at
+                          :outbox/uncertain-at :outbox/provider-ref
+                          :outbox/reason :outbox/detail :outbox/attempt})
+          (ensure! (non-blank-string? (:outbox/idempotency-key event))
+                   "Outbox idempotency key must be a non-blank string" {})
+          (ensure! (non-blank-string? (:outbox/fencing-token event))
+                   "Outbox event requires a fencing token" {:kind kind})
+          (ensure! (non-blank-string? (:outbox/issued-by event))
+                   "Outbox event requires an evaluator identity" {:kind kind})
+          (when (contains? event :outbox/attempt)
+            (ensure! (non-negative-int? (:outbox/attempt event))
+                     "Outbox attempt must be a non-negative integer" {}))
+          (when (contains? event :outbox/provider-ref)
+            (ensure! (non-blank-string? (:outbox/provider-ref event))
+                     "Outbox provider ref must be a non-blank string" {}))
+          (when (contains? event :outbox/reason)
+            (ensure! (keyword? (:outbox/reason event))
+                     "Outbox failure reason must be a named reason" {}))
+          (when (contains? event :outbox/detail)
+            (ensure! (string? (:outbox/detail event))
+                     "Outbox uncertainty detail must be a string" {})))))
+  event)
+
+(defn- validate-outbox-record!
+  "Strict validation of an `:outbox` payload: the exact record shape
+   plus per-kind event validation. Unknown or malformed outbox events
+   are :invalid and can never be written."
+  [payload]
+  (shape! payload #{:record/kind :outbox/event} :outbox-record)
+  (validate-outbox-event! (:outbox/event payload))
+  payload)
+
 (def ^:private gate-decisions #{:allow :deny :defer :invalid})
 (def ^:private gate-outcomes
   #{:satisfied :unknown :stale :failed :forged :violated :defer})
@@ -625,6 +726,7 @@
       :governance (validate-governance-record! payload)
       :task (validate-task-record! payload)
       :lease (validate-lease-record! payload)
+      :outbox (validate-outbox-record! payload)
       (model/invalid! "Unknown record kind" {:record/kind (:record/kind payload)})))
   envelope)
 
@@ -712,6 +814,27 @@
                         :candidate/id (model/candidate-id lease-event)
                         :payload {:record/kind :lease
                                   :lease/event lease-event})]
+    (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope))))))
+
+(defn record-outbox
+  "Pure construction of the envelope to store for an action-outbox
+   event (`:outbox/intent-recorded`, `:outbox/executed`,
+   `:outbox/failed`, `:outbox/uncertain`). The event is validated
+   strictly per kind: every kind requires the idempotency key, the
+   fencing token of the lease the intent was recorded under, and
+   the issuing evaluator (supervisor) identity; only the supervisor
+   transitions intents, never the worker. The envelope's
+   :candidate/id is the content digest of the event
+   (`axiom.model/candidate-id`): Axiom never invents an identity.
+   Returns the envelope without :seq; the store assigns the
+   sequence transactionally."
+  [prev-envelope {:keys [outbox-event] :as inputs}]
+  (ensure! (map? outbox-event) "record-outbox requires an outbox event map" {})
+  (validate-outbox-event! outbox-event)
+  (let [envelope (assoc (base-envelope prev-envelope inputs)
+                        :candidate/id (model/candidate-id outbox-event)
+                        :payload {:record/kind :outbox
+                                  :outbox/event outbox-event})]
     (validate-envelope! (assoc envelope :payload/digest (model/digest (:payload envelope))))))
 
 (defn record-event
@@ -834,7 +957,7 @@
     :scenario (vec (get-in envelope [:payload :scenario :events]))
     :event [(get-in envelope [:payload :event])]
     (:observation :evidence-record :decision/gate-evaluation :governance
-     :task :lease) []
+     :task :lease :outbox) []
     (operational! "Unknown record kind in stored envelope"
                   {:record/kind (get-in envelope [:payload :record/kind])})))
 

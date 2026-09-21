@@ -44,7 +44,8 @@
    decision."
   (:require [clojure.string :as str]
             [axiom.git :as git]
-            [axiom.ledger :as ledger]))
+            [axiom.ledger :as ledger]
+            [axiom.model :as model]))
 
 ;; ------------------------------------------------------------------
 ;; Shape predicates (private; malformed input -> :invalid)
@@ -590,3 +591,272 @@
       (nil? current) :no-lease-held
       (not= token (:lease/token current)) :stale-fencing-token
       :else nil)))
+
+;; ------------------------------------------------------------------
+;; Action outbox (T4)
+;;
+;; Pure outbox logic over `:outbox/*` event maps in ledger order. The
+;; events themselves are recorded through the 0002 append path
+;; (`axiom.ledger/record-outbox`); the intents are executed only by
+;; the supervisor (never by the worker) and reconciled afterward.
+;; These functions compute the projection, the pure transition
+;; decisions and the reconciliation plan; they perform no I/O.
+;;
+;; The idempotency key is (task-id, action, payload-digest): a
+;; resubmission of the same key returns the existing intent, never a
+;; second execution. Crash recovery: on restart the supervisor
+;; replays the outbox (`outbox-intents` over the event prefix); an
+;; intent with no terminal state is reconciled by querying the
+;; provider (idempotent operations only), never by blind retry.
+
+(def outbox-states
+  "The outbox intent states (R7)."
+  #{:intent-recorded :executing :executed :failed :uncertain})
+
+(def ^:private outbox-event->state
+  {:outbox/intent-recorded :intent-recorded
+   :outbox/executed :executed
+   :outbox/failed :failed
+   :outbox/uncertain :uncertain})
+
+(defn outbox-idempotency-key
+  "Pure idempotency-key derivation: `(task-id, action,
+   payload-digest)`. Deterministic and content-addressed — the same
+   logical effect always maps to the same key, so duplicate
+   submissions are deduplicated on it."
+  [task-id action payload]
+  (str "outbox/" task-id "/" (name action) "/" (model/digest payload)))
+
+(defn- apply-outbox-event
+  "Fold one `:outbox/*` event into the {idempotency-key intent}
+   projection. The intent's state is the latest event's state;
+   `:outbox/attempts` counts how many times execution was (re-)driven
+   (the number of `:outbox/intent-recorded` events for the key)."
+  [intents event]
+  (let [key (:outbox/idempotency-key event)
+        state (get outbox-event->state (:event/kind event))]
+    (if (or (nil? key) (nil? state))
+      intents
+      (update intents key
+              (fn [intent]
+                (-> (merge intent (select-keys event [:outbox/task-id :outbox/action
+                                                     :outbox/payload :outbox/fencing-token
+                                                     :outbox/issued-by :outbox/provider-ref
+                                                     :outbox/reason :outbox/detail]))
+                    (assoc :outbox/idempotency-key key
+                           :outbox/state state
+                           :outbox/attempts (cond-> (or (:outbox/attempts intent) 0)
+                                             (= :outbox/intent-recorded (:event/kind event))
+                                             inc))))))))
+
+(defn outbox-intents
+  "Pure projection of the outbox over a sequence of `:outbox/*` event
+   maps in ledger order. Returns {idempotency-key intent} where each
+   intent carries `:outbox/state` (`:intent-recorded` | `:executing` |
+   `:executed` | `:failed` | `:uncertain`), the recorded fields and
+   `:outbox/attempts`."
+  [outbox-events]
+  (reduce apply-outbox-event {} outbox-events))
+
+(defn- outbox-input-ok?
+  [input]
+  (and (map? input)
+       (non-blank-string? (:outbox/task-id input))
+       (keyword? (:outbox/action input))
+       (map? (:outbox/payload input))
+       (non-blank-string? (:outbox/fencing-token input))
+       (non-blank-string? (:outbox/issued-by input))))
+
+(defn record-intent
+  "Pure intent-recording decision over the outbox projection and the
+   current-leases projection. The idempotency key is derived from
+   (task-id, action, payload): a resubmission of the same key
+   returns `{:outbox/ok false, :outbox/reason :duplicate-intent,
+   :outbox/existing <intent>}` — the existing intent, never a second
+   execution. Recording requires a live lease with a matching fencing
+   token (`:no-lease-held` / `:stale-fencing-token`) and the issuing
+   evaluator identity (`:outbox/issued-by` must equal the lease's
+   `:lease/issued-by` — only the supervisor records intents, never
+   the worker; otherwise `:not-supervisor`). Malformed input yields
+   `:malformed` and can never produce an event."
+  [intents leases input]
+  (let [task-id (:outbox/task-id input)
+        key (when (outbox-input-ok? input)
+              (outbox-idempotency-key task-id (:outbox/action input)
+                                      (:outbox/payload input)))]
+    (cond
+      (or (not (map? intents)) (not (map? leases)) (nil? key))
+      {:outbox/ok false :outbox/reason :malformed}
+
+      (contains? intents key)
+      {:outbox/ok false :outbox/reason :duplicate-intent
+       :outbox/existing (get intents key)}
+
+      :else
+      (let [lease (get leases task-id)]
+        (cond
+          (nil? lease)
+          {:outbox/ok false :outbox/reason :no-lease-held}
+
+          (not= (:outbox/fencing-token input) (:lease/token lease))
+          {:outbox/ok false :outbox/reason :stale-fencing-token}
+
+          (not= (:outbox/issued-by input) (:lease/issued-by lease))
+          {:outbox/ok false :outbox/reason :not-supervisor}
+
+          :else
+          {:outbox/ok true
+           :outbox/event {:event/kind :outbox/intent-recorded
+                          :outbox/idempotency-key key
+                          :outbox/task-id task-id
+                          :outbox/action (:outbox/action input)
+                          :outbox/payload (:outbox/payload input)
+                          :outbox/fencing-token (:outbox/fencing-token input)
+                          :outbox/issued-by (:outbox/issued-by input)
+                          :outbox/attempt 0}})))))
+
+(def ^:private outbox-transitions
+  "The supervisor-only outbox state machine. `:intent-recorded` is
+   the state after the supervisor records the intent and before the
+   provider write completes; `:executing` is the transient
+   in-supervisor state while the provider write is in flight (it is
+   not a ledger event — a crash during `:executing` replays as
+   `:intent-recorded`, which reconciliation resolves by provider
+   query). Terminal states are never left."
+  {:intent-recorded #{:executing :executed :failed :uncertain}
+   :executing #{:executed :failed :uncertain}
+   :uncertain #{:intent-recorded :executed :failed}
+   :executed #{}
+   :failed #{}})
+
+(defn transition-intent
+  "Pure supervisor-only transition decision over the outbox
+   projection and the current-leases projection. The intent must
+   exist (`:unknown-intent`); the fencing token must match the
+   task's current lease — a stale worker cannot move intents
+   (`:stale-fencing-token`); the transition must come from the
+   issuing evaluator (`:not-supervisor`); and the move must be in
+   the state machine (`:illegal-transition`). A re-drive
+   (`:uncertain → :intent-recorded`) rotates nothing — the
+   idempotency key is unchanged, so the provider query that
+   resolved the uncertainty is what guards against double
+   execution. Malformed input yields `:malformed`."
+  [intents leases input]
+  (let [key (:outbox/idempotency-key input)
+        to (:outbox/to-state input)
+        intent (get intents key)
+        task-id (:outbox/task-id intent)]
+    (cond
+      (or (not (map? intents)) (not (map? leases)) (not (map? input))
+          (not (non-blank-string? key))
+          (not (contains? outbox-states to))
+          (not (non-blank-string? (:outbox/fencing-token input)))
+          (not (non-blank-string? (:outbox/issued-by input))))
+      {:outbox/ok false :outbox/reason :malformed}
+
+      (nil? intent)
+      {:outbox/ok false :outbox/reason :unknown-intent}
+
+      :else
+      (let [lease (get leases task-id)
+            from (:outbox/state intent)]
+        (cond
+          (nil? lease)
+          {:outbox/ok false :outbox/reason :no-lease-held}
+
+          (not= (:outbox/fencing-token input) (:lease/token lease))
+          {:outbox/ok false :outbox/reason :stale-fencing-token}
+
+          (not= (:outbox/issued-by input) (:lease/issued-by lease))
+          {:outbox/ok false :outbox/reason :not-supervisor}
+
+          (not (contains? (get outbox-transitions from #{}) to))
+          {:outbox/ok false :outbox/reason :illegal-transition
+           :outbox/from from :outbox/to to}
+
+          :else
+          (if (= :executing to)
+            ;; `:executing` is the supervisor's transient local state
+            ;; while the provider write is in flight — it is never a
+            ;; ledger event. A crash during `:executing` replays the
+            ;; intent as `:intent-recorded`, which reconciliation
+            ;; resolves by provider query.
+            {:outbox/ok true :outbox/transient true
+             :outbox/idempotency-key key
+             :outbox/state :executing}
+            (let [drives (:outbox/attempts intent 0)
+                  ;; `:outbox/attempt` is the drive index the event
+                  ;; belongs to: a re-drive is the next drive, a
+                  ;; terminal/uncertainty event belongs to the current
+                  ;; drive. It also keeps the 0002 dedup key distinct
+                  ;; per drive.
+                  attempt (if (= :intent-recorded to) drives (dec drives))]
+              {:outbox/ok true
+               :outbox/event (cond-> {:event/kind (case to
+                                                    :executed :outbox/executed
+                                                    :failed :outbox/failed
+                                                    :uncertain :outbox/uncertain
+                                                    :intent-recorded :outbox/intent-recorded)
+                                      :outbox/idempotency-key key
+                                      :outbox/fencing-token (:outbox/fencing-token input)
+                                      :outbox/issued-by (:outbox/issued-by input)
+                                      :outbox/attempt attempt}
+                               ;; A re-drive carries the intent's
+                               ;; identity forward (the ledger
+                               ;; requires task/action/payload on every
+                               ;; `:outbox/intent-recorded`).
+                               (= :intent-recorded to)
+                               (merge (select-keys intent [:outbox/task-id :outbox/action
+                                                           :outbox/payload]))
+                               (= :failed to)
+                               (assoc :outbox/reason (:outbox/reason input))
+                               (= :uncertain to)
+                               (assoc :outbox/detail (:outbox/detail input))
+                               (= :executed to)
+                               (assoc :outbox/provider-ref (:outbox/provider-ref input)))})))))))
+
+(defn reconcile-outbox
+  "Pure crash-recovery plan over (outbox-state, provider-state).
+   `provider-state` is {idempotency-key {:provider/effect-present?
+   bool}} — the answers to provider queries the supervisor already
+   performed (idempotent operations only). Returns {idempotency-key
+   plan} for intents needing action; intents needing nothing are
+   absent:
+
+   - `:executed` → absent: never re-executed.
+   - `:failed` → `{:reconcile/action :report-blocker}`: reported,
+     never blind-retried.
+   - `:intent-recorded` / `:uncertain` with a provider answer →
+     `{:reconcile/action :mark-executed}` when the effect is
+     present (the crash happened after external success:
+     exactly-once, no re-execution), or `{:reconcile/action
+     :re-drive}` when absent (a fresh drive under the same
+     idempotency key — the query, not a blind retry, is what
+     proved the effect missing).
+   - `:intent-recorded` / `:uncertain` with no provider answer →
+     `{:reconcile/action :query-provider}`: the supervisor must
+     query first; the plan never assumes."
+  [intents provider-state]
+  (into {}
+        (keep (fn [[key intent]]
+                (let [answer (get provider-state key)
+                      present? (:provider/effect-present? answer)]
+                  (case (:outbox/state intent)
+                    :executed nil
+                    :failed [key {:reconcile/action :report-blocker
+                                  :outbox/idempotency-key key
+                                  :outbox/state :failed}]
+                    (:intent-recorded :uncertain)
+                    (cond
+                      (nil? answer)
+                      [key {:reconcile/action :query-provider
+                            :outbox/idempotency-key key
+                            :outbox/state (:outbox/state intent)}]
+                      present?
+                      [key {:reconcile/action :mark-executed
+                            :outbox/idempotency-key key}]
+                      :else
+                      [key {:reconcile/action :re-drive
+                            :outbox/idempotency-key key}])
+                    nil))))
+        intents))
