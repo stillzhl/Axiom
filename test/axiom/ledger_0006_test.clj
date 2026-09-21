@@ -80,6 +80,41 @@
                (error-kind #(ledger/record-task nil (assoc (inputs 0) :task-event event))))
             (str "expected :invalid for " event))))))
 
+(deftest task-accepted-capability-grant
+  (testing "a well-formed grant records; a malformed grant is :invalid"
+    (let [base {:event/kind :task/accepted
+                :task/id "synth-task-1"
+                :task/class :task-class/standard
+                :task/evaluator "synth-evaluator-1"}
+          grant {:capability/read-file true
+                 :capability/write-file #{"docs/" "examples/"}
+                 :capability/run-tests true
+                 :capability/shell false}
+          recorded (ledger/record-task
+                    nil (assoc (inputs 0) :task-event
+                               (assoc base :task/capabilities grant)))]
+      (is (= grant (get-in recorded [:payload :task/event :task/capabilities]))))
+    (let [base {:event/kind :task/accepted
+                :task/id "synth-task-1"
+                :task/class :task-class/standard
+                :task/evaluator "synth-evaluator-1"}]
+      (doseq [grant [;; unknown capability: the set is closed
+                     {:capability/launch-missiles true}
+                     ;; write-file must be a non-empty set of path strings
+                     {:capability/write-file true}
+                     {:capability/write-file #{}}
+                     {:capability/write-file #{"docs/" 7}}
+                     ;; boolean capabilities must be booleans
+                     {:capability/shell "yes"}
+                     {:capability/run-tests 1}
+                     ;; not a map at all
+                     [:capability/shell]]]
+        (is (= :invalid
+               (error-kind #(ledger/record-task
+                             nil (assoc (inputs 1) :task-event
+                                        (assoc base :task/capabilities grant)))))
+            (str "expected :invalid for grant " (pr-str grant)))))))
+
 ;; ------------------------------------------------------------------
 ;; :lease/* events
 

@@ -58,7 +58,7 @@ Slice 1 (2026-09-20, PR #28): T1–T2 implemented in the pure
   exactly one lease, `rebuild-leases!` proving the sidecar is a
   pure function of the event prefix; same-token crash-retry of an
   acquire is idempotent.)
-- [ ] T4: Implement the action outbox (the 0002-deferred item):
+- [x] T4: Implement the action outbox (the 0002-deferred item):
   intent records with idempotency keys, supervisor-only
   transitions (`:intent-recorded → :executing → :executed |
   :failed`, plus `:uncertain`), and the pure

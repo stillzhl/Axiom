@@ -171,3 +171,61 @@ implementation (tasks T1–T8) is pending.
   caller-side and lands with the T8 `run-task` wiring. The
   provider query interface is a test double here; the real
   provider adapters are consumer-side.
+
+## Slice C evidence — T5 (2026-09-21)
+
+- Grant model on the task record: `:task/accepted` accepts an
+  optional `:task/capabilities` map, validated strictly — keys
+  must belong to the closed `axiom.ledger/capability-set`
+  (`:capability/read-file`, `:capability/write-file`,
+  `:capability/run-tests`, `:capability/shell`); `read-file`,
+  `run-tests`, `shell` are booleans; `write-file` is a non-empty
+  set of path-prefix strings. Unknown capabilities, wrong value
+  shapes, or a non-map grant are `:invalid` and never writable.
+  The closed set's canonical definition moved to `axiom.ledger`
+  (it validates recorded data); `axiom.execute/capability-set`
+  is a re-export, so the proposal evaluator's `:unknown-capability`
+  / `:unauthorized-capability` denials are unchanged.
+- New explicit adapter `axiom.adapters.worktree` (R3): isolated
+  worktree lifecycle with a deterministic identity
+  `wt-<16 hex of SHA-256(task-id "/" base-identity)>` pinned to
+  the task's base identity (two tasks never share an identity;
+  re-creation is idempotent); `create-worktree` (required
+  task-id, base-identity, root; optional seed directory copied
+  in as the test seam for the pinned checkout),
+  `resolve-path` (pure lexical confinement — `..` above the
+  root, absolute paths and blank paths are refused with
+  `:path-escape` and never resolved), and `destroy-worktree`
+  (recursive delete, idempotent, and guarded so only the
+  worktree's own `root/id` path is ever deleted — a forged
+  worktree map yields `:malformed` and deletes nothing).
+  Symlink analysis stays at T6 patch admission; the proposal
+  path-safety check is lexical, as before.
+- New tests: `worktree_test` (4 deftests — identity
+  determinism/uniqueness, create lifecycle incl. seed copy and
+  malformed-input refusals, structural confinement escapes,
+  guarded idempotent destruction) and
+  `task-accepted-capability-grant` in `ledger_0006_test`
+  (well-formed grant records; seven malformed grant shapes —
+  unknown capability, non-set/empty/non-string write-file,
+  non-boolean shell/run-tests, non-map — are `:invalid`).
+  The T1/T2 `check-capability` and `evaluate-proposal` denial
+  tests already machine-check: shell without a grant →
+  `:unauthorized-capability` (the evaluator is pure, so no
+  process can be spawned on a denied request), unknown
+  capability → `:unknown-capability`, write outside the granted
+  prefixes refused, and the adversarial corpus still cannot
+  turn deny into admit. Every identity is `synth-*`; worktrees
+  live under temp dirs and are destroyed afterwards; no
+  network, no live credentials.
+- `./scripts/check` on `feat/0006-capability-worktree`:
+  **274 tests, 2649 assertions, 0 failures, 0 errors**
+  (Temurin 17.0.20, Clojure 1.12.0); all CLI gates green
+  (0002–0005 replays, bundles, observations, gates), no
+  network, all fixtures `synth-*`.
+- Honest limits: the grant is validated at record time and
+  enforced by the pure proposal evaluator; the supervisor
+  loop that creates the worktree and runs the worker inside
+  it lands with the T7 agent adapters and the T8 `run-task`
+  wiring. The seed-copy seam stands in for the pinned
+  checkout; a real git worktree population is caller-side.
