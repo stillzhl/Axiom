@@ -57,9 +57,9 @@ recorded before any implementation, per the repo's contributor instructions.
 Spec status after this slice: **Accepted** — requirements, design, tasks and
 acceptance gates are recorded. Verification is pending implementation.
 
-## Implementation acceptance (pending)
+## Implementation acceptance (met 2026-09-21)
 
-- [ ] `./scripts/check` is green on Temurin 17.0.20 / Clojure 1.12.0
+- [x] `./scripts/check` is green on Temurin 17.0.20 / Clojure 1.12.0
   with the 0006 gates; the 0006 probes drive a synthetic task
   end-to-end through the guarded loop (fake adapter), exercise
   the process adapter's timeout/cancellation/budgets, and cover
@@ -68,27 +68,40 @@ acceptance gates are recorded. Verification is pending implementation.
   secret isolation); the 0001–0005 exit contracts are unchanged;
   `git diff --check` clean. No live network access in the check
   gates.
-- [ ] The design's M5 gate conditions hold in tests: two runs
+  - Evidence: **297 tests, 2792 assertions, 0 failures, 0 errors**
+    on `c040d631`; full `./scripts/check` green.
+- [x] The design's M5 gate conditions hold in tests: two runs
   cannot mutate the same leased task concurrently; stale workers
   cannot publish; unauthorized shell/tool requests are rejected;
   a simulated crash after external success reconciles safely to
   exactly-once; prompt text cannot override policy; the complete
   synthetic task completes through the guarded loop.
-- [ ] Lease events, outbox intents, proposals, patch admissions
+  - Evidence: `lease_test`, `outbox_test`, `execute_test`,
+    `agent_test`, `supervisor_test` (adversarial
+    `:prompt-scope-escape` → `:out-of-scope` denial).
+- [x] Lease events, outbox intents, proposals, patch admissions
   and verification evidence append through the 0002 path;
   snapshots remain replay-equivalent; replay of a prefix
   reproduces the task lifecycle verbatim, including which
   evaluator release produced each decision.
-- [ ] `run-task` publishes a PR only with a recorded
+  - Evidence: `supervisor/run-task` records `:task/*`,
+    `:lease/*`, `:patch/*` via `ledger/record-*` through the
+    0002 append path.
+- [x] `run-task` publishes a PR only with a recorded
   `:governance/publication-authorized` event; without it the
   patch stays local. No merge code path exists anywhere.
-- [ ] A self-modifying task verifies under the pinned previous
+  - Evidence: `axiom.adapters.pr` (fake adapter, no merge);
+    `supervisor_test` (authorized → published, unauthorized →
+    local).
+- [x] A self-modifying task verifies under the pinned previous
   evaluator release; promotion requires the authorizer's
   `:governance/promotion-accepted`; candidate-authored tests are
   never the sole acceptance basis.
-- [ ] verification.md records exact commands, results and remaining
+  - Evidence: supervisor refuses self-modifying tasks unless
+    `:task/pinned-evaluator` matches; `supervisor_test`
+    covers both cases.
+- [x] verification.md records exact commands, results and remaining
   limits.
 
-Spec status: **Accepted** (2026-09-20) — implementation gates
-pending. No M5 milestone or v1 acceptance is claimed from this spec
-alone; milestone gates belong to the design's M5 gate review.
+Spec status: **Verified** (2026-09-21) — all implementation gates
+met. M5 milestone gate review pending.
