@@ -243,4 +243,4 @@
                        :diff/digest digest
                        :diff/symlink? false})))]
       {:worktree/ok true
-       :diff/operations (sort-by :diff/path ops)})))
+       :diff/operations (vec (sort-by :diff/path ops))})))

@@ -387,3 +387,44 @@ green but the audit identified integration gaps):
   **287 tests, 2758 assertions, 0 failures, 0 errors**
   (Temurin 17.0.20, Clojure 1.12.0); all CLI gates green,
   no network, all fixtures `synth-*`.
+
+## Slice F evidence — T8 (2026-09-21)
+
+- New `axiom.supervisor` namespace: `run-task` drives one
+  synthetic task end-to-end through the guarded loop —
+  admission (`:task/accepted` with capability grant),
+  lease acquisition with fencing token, the proposal loop
+  through the agent adapter (fake or process), patch
+  admission via `diff-worktree` → `admit-patch`, post-action
+  verification via `verify-patch`, ledger evidence
+  (`:task/*`, `:lease/*`, `:patch/*` through the 0002
+  append path), and the task lifecycle (`:task/completed`
+  or `:task/blocked` with named blockers). The CLI
+  `run-task --task TASK-EDN --adapter fake|process` is a thin
+  adapter over it.
+- Exit contract: 0 valid report (the task may complete or be
+  blocked — the run is valid), 4 invalid input (malformed
+  task EDN, unknown adapter), 5 operational failure. Matches
+  0002–0005.
+- Adversarial `:prompt-scope-escape`: a fake-agent
+  scope-widening proposal (`src/axiom/ledger.clj` outside the
+  `docs/` scope) is denied by `evaluate-proposal` with
+  `:out-of-scope` before any action executes; the task is
+  `:task/blocked` with the blocker named.
+- New tests: `supervisor_test` (3 deftests — fake adapter
+  completes a synthetic docs task through the guarded loop
+  with patch digest and evidence digest; adversarial
+  scope-widen blocks with `:out-of-scope`; exit 4 on
+  malformed task, missing id, unknown adapter). Every
+  identity is `synth-*`; no network, no live credentials.
+- `./scripts/check` on `feat/0006-supervisor`:
+  **290 tests, 2772 assertions, 0 failures, 0 errors**
+  (Temurin 17.0.20, Clojure 1.12.0); all CLI gates green,
+  no network, all fixtures `synth-*`.
+- Honest limits: the supervisor runs the synthetic loop
+  with in-memory/temp resources; the process adapter path is
+  exercised in `agent_test` but the full `run-task
+  --adapter process` loop is not covered by an automated
+  test (the fake adapter is the deterministic offline path).
+  Proposal events are not in the 0006 ledger schema —
+  admissions are recorded in the report, not the ledger.

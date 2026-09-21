@@ -12,6 +12,7 @@
             [axiom.nomos :as nomos]
             [axiom.policy :as policy]
             [axiom.store :as store]
+            [axiom.supervisor :as supervisor]
             [clojure.java.io :as io]
             [clojure.string :as str])
   (:import (java.nio ByteBuffer)
@@ -244,6 +245,28 @@
               {:exit (if (:run/complete? record) 0 5)
                :output record}))))
       (usage-observations))))
+
+;; ------------------------------------------------------------------
+;; Spec 0006 commands: run-task (T8)
+
+(defn- run-task!
+  "Thin adapter over `axiom.supervisor/run-task`: drives one
+   synthetic task through the guarded loop and emits the EDN
+   report. Exit 0: valid report (the task may have completed or
+   been blocked with a named blocker — the run itself is valid).
+   Exit 4: invalid input (malformed task EDN, unknown adapter).
+   Exit 5: operational failure."
+  [operands]
+  (let [[f1 v1 f2 v2] operands]
+    (if (and (= "--task" f1) (string? v1)
+             (= "--adapter" f2) (string? v2)
+             (= 4 (count operands)))
+      (let [{:keys [supervisor/exit supervisor/report]}
+            (supervisor/run-task {:task/definition (slurp v1)
+                                  :task/adapter v2})]
+        {:exit exit :output report})
+      {:exit 4 :output {:error :usage
+                        :message "axiom run-task --task TASK-EDN --adapter fake|process"}})))
 
 ;; ------------------------------------------------------------------
 ;; Spec 0004 commands: observe-github / check-pr (T5)
@@ -884,6 +907,9 @@
 
         (= "run" command)
         (run-diagnostic! operands)
+
+        (= "run-task" command)
+        (run-task! operands)
 
         :else (usage)))
     (catch clojure.lang.ExceptionInfo e
