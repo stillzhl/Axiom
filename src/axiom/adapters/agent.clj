@@ -134,10 +134,23 @@
        (sequential? (:proposal/actions x))
        (every? map? (:proposal/actions x))))
 
+(defn- valid-env?
+  "The `:agent/env` shape rule (spec 0006 amendment A1, AR8): when
+   present, the environment must be a map with string keys and
+   string values. Absent (nil) is fine — the adapter never invents
+   environment."
+  [env]
+  (or (nil? env)
+      (and (map? env)
+           (every? (fn [[k v]] (and (string? k) (string? v))) env))))
+
 (defn- start-process
   [agent {:agent/keys [argv env] :as _request}]
   (cond
-    (not (and (sequential? argv) (seq argv) (every? string? argv)))
+    (not (and (sequential? argv) (seq argv) (every? non-blank-string? argv)))
+    {:agent/ok false :agent/reason :malformed :agent/id (:agent/id agent)}
+
+    (not (valid-env? env))
     {:agent/ok false :agent/reason :malformed :agent/id (:agent/id agent)}
 
     :else

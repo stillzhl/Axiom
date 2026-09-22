@@ -126,7 +126,54 @@
         (doseq [f (.listFiles root)] (.delete f))
         (.delete root)))))
 
-(deftest process-agent-cancellation
+(deftest process-agent-hardened-request-validation
+  (testing "blank argv elements are :malformed and never spawned"
+    (let [[root wt] (temp-worktree)]
+      (try
+        (let [a (agent/make-agent {:agent/kind :process
+                                   :agent/id "synth-agent-proc-6"
+                                   :agent/worktree wt
+                                   :agent/timeout-ms 5000})]
+          ;; A blank executable would previously reach ProcessBuilder
+          ;; and fail as :spawn-failed; now it is :malformed up front.
+          (is (= :malformed (:agent/reason
+                             (agent/run-agent a {:agent/argv ["" "x"]}))))
+          (is (= :malformed (:agent/reason
+                             (agent/run-agent a {:agent/argv ["echo" ""]}))))
+          (is (= :malformed (:agent/reason
+                             (agent/run-agent a {:agent/argv ["echo" "  "]}))))
+          (is (= :malformed (:agent/reason
+                             (agent/run-agent a {:agent/argv ["echo" 7]})))))
+        (finally
+          (doseq [f (.listFiles root)] (.delete f))
+          (.delete root))))
+  (testing ":agent/env must be a map of strings when present"
+    (let [[root wt] (temp-worktree)]
+      (try
+        (let [a (agent/make-agent {:agent/kind :process
+                                   :agent/id "synth-agent-proc-7"
+                                   :agent/worktree wt
+                                   :agent/timeout-ms 5000})
+              good-argv ["echo" "{:proposal/actions []}"]]
+          ;; absent env is fine
+          (is (true? (:agent/ok (agent/run-agent a {:agent/argv good-argv}))))
+          ;; string->string env is fine
+          (is (true? (:agent/ok (agent/run-agent
+                                 a {:agent/argv good-argv
+                                    :agent/env {"SYNTH_VAR" "synth-value"}}))))
+          ;; non-string keys/values and non-maps are :malformed
+          (doseq [env [{"SYNTH_VAR" 7}
+                       {7 "synth-value"}
+                       {"SYNTH_VAR" nil}
+                       "not-a-map"
+                       ["SYNTH_VAR" "synth-value"]]]
+            (is (= :malformed (:agent/reason
+                               (agent/run-agent a {:agent/argv good-argv
+                                                   :agent/env env})))
+                (str "expected :malformed for env " (pr-str env)))))
+        (finally
+          (doseq [f (.listFiles root)] (.delete f))
+          (.delete root))))))
   (testing "cancel! SIGKILLs a running worker and wait! reports :cancelled"
     (let [[root wt] (temp-worktree)]
       (try
