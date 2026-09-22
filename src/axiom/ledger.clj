@@ -131,10 +131,15 @@
   "The `:governance/*` event kinds this slice records. Policy
    approvals and revocations follow the `axiom.policy` event shape;
    verifier-config approvals, protection changes and admin bypasses
-   are the R2/R6 authorization events."
+   are the R2/R6 authorization events. Spec 0006 amendment A1 adds
+   `:governance/publication-authorized` and
+   `:governance/promotion-accepted` (the 0006 design's 0002 payload
+   kinds for supervised-execution publication and policy-promotion
+   authorization)."
   #{:governance/policy-approved :governance/policy-revoked
     :governance/verifier-config-approved :governance/protection-changed
-    :governance/admin-bypass})
+    :governance/admin-bypass
+    :governance/publication-authorized :governance/promotion-accepted})
 
 (def ^:private trust-marks
   #{:trust/local-diagnostic :trust/provider-observed
@@ -253,7 +258,41 @@
           (ensure! (non-blank-string? (:governance/actor event))
                    "Admin bypass requires an actor identity" {})
           (ensure! (non-blank-string? (:governance/reason event))
-                   "Admin bypass requires a reason" {}))))
+                   "Admin bypass requires a reason" {}))
+
+      :governance/publication-authorized
+      (do (governance-shape! event kind
+                             #{:event/kind :task/id}
+                             #{:event/kind :event/id :task/id
+                               :governance/authorizer :governance/approver
+                               :governance/policy-id :patch/digest})
+          (ensure! (non-blank-string? (:task/id event))
+                   "Publication authorization requires a task id" {})
+          (ensure! (authorizer-of event)
+                   "Governance event requires an authorizer identity" {:kind kind})
+          (when (contains? event :governance/policy-id)
+            (ensure! (non-blank-string? (:governance/policy-id event))
+                     "Governance policy id must be a non-blank string" {}))
+          (when (contains? event :patch/digest)
+            (ensure! (digest? (:patch/digest event))
+                     "Publication authorization patch digest must be sha256-shaped" {})))
+
+      :governance/promotion-accepted
+      (do (governance-shape! event kind
+                             #{:event/kind :task/id}
+                             #{:event/kind :event/id :task/id
+                               :governance/authorizer :governance/approver
+                               :patch/digest :governance/evidence-digest})
+          (ensure! (non-blank-string? (:task/id event))
+                   "Promotion acceptance requires a task id" {})
+          (ensure! (authorizer-of event)
+                   "Governance event requires an authorizer identity" {:kind kind})
+          (when (contains? event :patch/digest)
+            (ensure! (digest? (:patch/digest event))
+                     "Promotion patch digest must be sha256-shaped" {}))
+          (when (contains? event :governance/evidence-digest)
+            (ensure! (digest? (:governance/evidence-digest event))
+                     "Promotion evidence digest must be sha256-shaped" {})))))
   event)
 
 (defn- validate-governance-record!
@@ -267,6 +306,20 @@
 
 ;; ---------------------------------------------------------------------------
 ;; Task lifecycle and lease events (spec 0006 T3)
+
+(defn valid-agent-argv?
+  "The shared `:agent/argv` shape rule (spec 0006 amendment A1,
+   AR1): a non-empty vector of non-blank strings whose first
+   element (the executable) is an absolute path. The single
+   definition used by the ledger (`:task/accepted`) and the
+   supervisor (task admission). The adapter never invents argv:
+   missing, empty, non-vector, blank-element, or
+   relative-executable argv is invalid."
+  [argv]
+  (and (vector? argv)
+       (seq argv)
+       (every? non-blank-string? argv)
+       (str/starts-with? (first argv) "/")))
 ;;
 ;; New payload kinds through the 0002 append path, additive to the
 ;; existing schema: `:task` (a task lifecycle event of one of the
@@ -367,7 +420,7 @@
                         #{:event/kind :task/id :task/class :task/evaluator}
                         #{:event/kind :event/id :task/id :task/class
                           :task/evaluator :task/scope-digest :task/accepted-at
-                          :task/capabilities})
+                          :task/capabilities :agent/argv})
           (ensure! (non-blank-string? (:task/id event))
                    "Task id must be a non-blank string" {})
           (ensure! (contains? task-classes (:task/class event))
@@ -379,7 +432,10 @@
                      "Invalid task scope digest" {}))
           (when (contains? event :task/capabilities)
             (ensure! (valid-capability-grant? (:task/capabilities event))
-                     "Invalid capability grant on the task record" {})))
+                     "Invalid capability grant on the task record" {}))
+          (when (contains? event :agent/argv)
+            (ensure! (valid-agent-argv? (:agent/argv event))
+                     "Invalid :agent/argv on the task record" {})))
 
       :task/context-prepared
       (do (event-shape! event kind
@@ -1010,12 +1066,18 @@
   "Pure construction of the envelope to store for a governance
    authorization event (`:governance/policy-approved`,
    `:governance/policy-revoked`, `:governance/verifier-config-approved`,
-   `:governance/protection-changed` or `:governance/admin-bypass`).
-   The event is validated strictly per kind: authorization-bearing
-   kinds require an authorizer identity and a content digest; the
-   admin-bypass kind requires the actor and the reason. Missing or
-   mismatched role identities are :invalid and can never be written.
-   The envelope's :candidate/id is the content digest of the event
+   `:governance/protection-changed`, `:governance/admin-bypass`,
+   `:governance/publication-authorized` or
+   `:governance/promotion-accepted`). The event is validated strictly
+   per kind: authorization-bearing kinds require an authorizer identity
+   and a content digest; the admin-bypass kind requires the actor and
+   the reason; the supervised-execution kinds
+   (`:governance/publication-authorized`,
+   `:governance/promotion-accepted`, spec 0006 amendment A1) require
+   the task id and an authorizer identity, with optional policy id and
+   sha256-shaped patch/evidence digests. Missing or mismatched role
+   identities are :invalid and can never be written. The envelope's
+   :candidate/id is the content digest of the event
    (`axiom.model/candidate-id`): Axiom never invents an identity.
    Returns the envelope without :seq; the store assigns the sequence
    transactionally."

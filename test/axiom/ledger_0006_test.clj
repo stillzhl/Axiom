@@ -209,3 +209,93 @@
       (is (= [] (ledger/extract-events (assoc lease-env :seq 1))))
       (is (= (model/digest (ledger/ledger-world []))
              (model/digest (ledger/ledger-world stored)))))))
+
+;; ------------------------------------------------------------------
+;; Amendment A1: the 0006 governance kinds and :agent/argv
+
+(defn- publication-authorized [overrides]
+  (merge {:event/kind :governance/publication-authorized
+          :task/id "synth-task-1"
+          :governance/authorizer "synth-owner"}
+         overrides))
+
+(defn- promotion-accepted [overrides]
+  (merge {:event/kind :governance/promotion-accepted
+          :task/id "synth-task-1"
+          :governance/approver "synth-owner"}
+         overrides))
+
+(deftest supervised-execution-governance-kinds-record
+  (testing "the two 0006 governance kinds record valid envelopes"
+    (doseq [[n event] (map-indexed
+                       vector
+                       [(publication-authorized {})
+                        (publication-authorized
+                         {:governance/policy-id "synth-policy-1"
+                          :patch/digest digest-a})
+                        (promotion-accepted {})
+                        (promotion-accepted
+                         {:patch/digest digest-a
+                          :governance/evidence-digest digest-a})])]
+      (let [env (ledger/record-governance nil (assoc (inputs n) :governance-event event))]
+        (is (= :governance (get-in env [:payload :record/kind])))
+        (is (= event (get-in env [:payload :governance/event])))
+        (is (= (model/digest (:payload env)) (:payload/digest env)))
+        (is (nil? (error-kind #(ledger/stored-envelope! (assoc env :seq n)))))))))
+
+(deftest supervised-execution-governance-kinds-reject-malformed
+  (testing "missing authorizer, unknown field, and malformed digests are :invalid"
+    (doseq [event [(dissoc (publication-authorized {}) :governance/authorizer)
+                   (assoc (publication-authorized {}) :governance/authorizer "")
+                   (assoc (publication-authorized {}) :task/id "")
+                   (dissoc (publication-authorized {}) :task/id)
+                   (assoc (publication-authorized {}) :governance/stray-field 1)
+                   (assoc (publication-authorized {})
+                          :patch/digest "not-a-digest")
+                   (assoc (publication-authorized {})
+                          :governance/policy-id "")
+                   (dissoc (promotion-accepted {}) :governance/approver)
+                   (assoc (promotion-accepted {}) :governance/evidence-digest "sha256:zzz")
+                   (assoc (promotion-accepted {}) :governance/stray-field 1)]]
+      (is (= :invalid
+             (error-kind #(ledger/record-governance nil (assoc (inputs 0) :governance-event event))))
+          (str "expected :invalid for " event)))))
+
+(deftest task-accepted-agent-argv
+  (testing "a valid :agent/argv records on :task/accepted"
+    (let [event {:event/kind :task/accepted
+                 :task/id "synth-task-1"
+                 :task/class :task-class/standard
+                 :task/evaluator "synth-evaluator-1"
+                 :agent/argv ["/usr/bin/python3" "/tmp/synth-agent.py"]}
+          env (ledger/record-task nil (assoc (inputs 0) :task-event event))]
+      (is (= (:agent/argv event) (get-in env [:payload :task/event :agent/argv])))))
+  (testing "malformed :agent/argv shapes are :invalid"
+    (let [base {:event/kind :task/accepted
+                :task/id "synth-task-1"
+                :task/class :task-class/standard
+                :task/evaluator "synth-evaluator-1"}]
+      (doseq [argv [;; missing/empty/non-vector
+                    nil [] "not-a-vector" '("/usr/bin/x")
+                    ;; blank element
+                    ["/usr/bin/python3" ""]
+                    ["/usr/bin/python3" "  "]
+                    ;; non-string element
+                    ["/usr/bin/python3" 7]
+                    ;; relative executable
+                    ["python3" "agent.py"]]]
+        (is (= :invalid
+               (error-kind #(ledger/record-task
+                             nil (assoc (inputs 1) :task-event
+                                        (assoc base :agent/argv argv)))))
+            (str "expected :invalid for argv " (pr-str argv)))))))
+
+(deftest supervised-execution-governance-is-provenance
+  (testing "the new governance envelopes contribute zero 0001 events"
+    (let [env (ledger/record-governance
+               nil (assoc (inputs 0)
+                          :governance-event (publication-authorized {})))
+          stored [(assoc env :seq 0)]]
+      (is (= [] (ledger/extract-events (assoc env :seq 0))))
+      (is (= (model/digest (ledger/ledger-world []))
+             (model/digest (ledger/ledger-world stored)))))))
