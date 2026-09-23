@@ -19,8 +19,10 @@
             [axiom.store :as store]
             [axiom.adapters.agent :as agent]
             [axiom.adapters.pr :as pr]
+            [axiom.adapters.runner :as runner-adapter]
             [axiom.adapters.worktree :as worktree]
-            [clojure.edn :as edn])
+            [clojure.edn :as edn]
+            [clojure.string :as str])
   (:import (java.io File)
            (java.nio.file Files)
            (java.nio.file.attribute FileAttribute)))
@@ -95,6 +97,15 @@
             (when-not ok?
               (model/invalid! "Task :task/seed-dir must be an absolute existing directory"
                               {:task/id (:task/id task)}))))
+        ;; A1-S5: the pinned recipe must be a non-empty vector of
+        ;; non-blank strings; it is executed for real at
+        ;; verification, so a malformed recipe is :invalid here,
+        ;; not a silent verification skip.
+        (let [recipe (:task/pinned-recipe task)]
+          (when-not (and (sequential? recipe) (seq recipe)
+                         (every? #(and (string? %) (not (str/blank? %))) recipe))
+            (model/invalid! "Task :task/pinned-recipe must be a non-empty vector of non-blank strings"
+                            {:task/id (:task/id task)})))
         {:agent/argv argv
          :task/agent-timeout-ms agent-timeout
          :task/recipe-timeout-seconds recipe-timeout}))))
@@ -129,6 +140,96 @@
                      :action/actual actual}))))))
         actions))
 
+(defn- recipe-registry
+  "Amendment A1-S5: builds the one-command explicit registry for
+   the task's pinned recipe. The executable is resolved against
+   the worktree (the registry requires an absolute path); the
+   recipe runs with the worktree as its working directory, so it
+   verifies the worker's actual files. The timeout comes from the
+   validated `:task/recipe-timeout-seconds` (default 120 s)."
+  [task worktree-path timeout-seconds]
+  (let [recipe (vec (:task/pinned-recipe task))
+        executable (first recipe)
+        exe-file (File. ^String executable)
+        abs-exe (if (.isAbsolute exe-file)
+                  executable
+                  (str (.getAbsolutePath (File. ^String worktree-path
+                                               ^String executable))))]
+    {:registry/version 1
+     :commands {"pinned-recipe"
+                {:command/id "pinned-recipe"
+                 :command/executable abs-exe
+                 :command/args (vec (rest recipe))
+                 :command/workdir worktree-path
+                 :command/timeout-seconds timeout-seconds
+                 :command/stdout-cap-bytes 16777216
+                 :command/stderr-cap-bytes 16777216
+                 :command/applicability "Pinned recipe for supervised task verification"
+                 :runner/shell false}}}))
+
+(defn- verify-pinned-recipe
+  "Amendment A1-S5: runs the task's pinned recipe for real via
+   `axiom.adapters.runner/run!` with a one-command explicit
+   registry. Returns the pure `execute/verify-patch` result on a
+   clean pass (evidence built from the real Evidence record,
+   digest binding preserved), or a named failure:
+   `:verification-failed` (nonzero exit),
+   `:verification-timed-out`, `:verification-output-capped`,
+   `:verification-cancelled`, `:verification-spawn-failed`
+   (the runner could not spawn the recipe)."
+  [task patch-verdict worktree-path timeout-seconds]
+  (let [registry (recipe-registry task worktree-path timeout-seconds)
+        evidence (try
+                   (runner-adapter/run!
+                    {:registry registry
+                     :command/id "pinned-recipe"
+                     :args {}
+                     :candidate {:candidate/base nil
+                                 :candidate/head nil
+                                 :candidate/tree nil}})
+                   (catch clojure.lang.ExceptionInfo e
+                     (if (= :operational (:axiom/error (ex-data e)))
+                       ::spawn-failed
+                       (throw e))))]
+    (cond
+      (= ::spawn-failed evidence)
+      {:patch/verdict :failed
+       :patch/reason :verification-spawn-failed
+       :patch/task-id (:task/id task)}
+
+      :else
+      (case (:run/outcome evidence)
+        :completed
+        (if (= :pass (:run/result evidence))
+          ;; Successful verification evidence stays a pure
+          ;; execute/verify-patch on the real Evidence record.
+          (execute/verify-patch
+           patch-verdict task
+           {:verification/recipe (vec (:task/pinned-recipe task))
+            :verification/exit (:run/exit evidence)
+            :verification/output (str "run " (:run/id evidence)
+                                      " stdout " (:run/stdout-digest evidence)
+                                      " stderr " (:run/stderr-digest evidence))})
+          {:patch/verdict :failed
+           :patch/reason :verification-failed
+           :patch/task-id (:task/id task)
+           :patch/exit (:run/exit evidence)})
+
+        :timed-out
+        {:patch/verdict :failed
+         :patch/reason :verification-timed-out
+         :patch/task-id (:task/id task)}
+
+        :output-capped
+        {:patch/verdict :failed
+         :patch/reason :verification-output-capped
+         :patch/task-id (:task/id task)}
+
+        :cancelled
+        {:patch/verdict :failed
+         :patch/reason :verification-cancelled
+         :patch/task-id (:task/id task)}))))
+
 (defn- run-loop
   "The guarded loop. Returns `{:supervisor/exit <0|4|5>,
    :supervisor/report {...}}`. Amendment A1: `:agent/argv` is
@@ -136,7 +237,8 @@
    the `:process` path never applies synthetic actions and
    cross-checks claimed content digests; budget usage is tracked
    and checked before each agent step."
-  [{:keys [task adapter-kind fake-script argv agent-timeout-ms]}]
+  [{:keys [task adapter-kind fake-script argv agent-timeout-ms
+           recipe-timeout-seconds]}]
   (let [ledger-file (File/createTempFile "axiom-run-task" ".db")
         _ (.delete ledger-file) ; store/open! creates it
         handle (store/open! (str ledger-file) {:create true})
@@ -146,14 +248,18 @@
       ;; Seed-dir (A1 AR1): an absolute existing directory whose
       ;; content populates the worktree base before
       ;; :task/base-files seeding, so the worktree diff only shows
-      ;; the worker's own changes.
+      ;; the worker's own changes. Files/copy preserves executable
+      ;; bits so pinned recipes remain spawnable.
       (when-some [seed (:task/seed-dir task)]
         (doseq [f (file-seq (File. ^String seed))
                 :when (.isFile ^File f)]
           (let [rel (str (.relativize (.toPath (File. ^String seed)) (.toPath ^File f)))
                 dest (File. ^File base-dir ^String rel)]
             (.mkdirs (.getParentFile dest))
-            (spit dest (slurp f)))))
+            (Files/copy (.toPath ^File f) (.toPath dest)
+                        (into-array java.nio.file.CopyOption
+                                    [java.nio.file.StandardCopyOption/COPY_ATTRIBUTES
+                                     java.nio.file.StandardCopyOption/REPLACE_EXISTING])))))
       ;; Seed the worktree base from the task's base files
       (doseq [[path content] (:task/base-files task)]
         (let [f (File. ^File base-dir ^String path)]
@@ -162,13 +268,17 @@
       (let [worktree {:worktree/id (str "wt-" (:task/id task))
                       :worktree/path (str wt-dir)
                       :worktree/root (str (.getParentFile wt-dir))}
-            ;; Copy base into worktree
+            ;; Copy base into worktree (preserving executable bits
+            ;; so pinned recipes remain spawnable)
             _ (doseq [f (file-seq base-dir)
                       :when (.isFile ^File f)]
                 (let [rel (str (.relativize (.toPath base-dir) (.toPath ^File f)))
                       dest (File. ^File wt-dir ^String rel)]
                   (.mkdirs (.getParentFile dest))
-                  (spit dest (slurp f))))
+                  (Files/copy (.toPath ^File f) (.toPath dest)
+                              (into-array java.nio.file.CopyOption
+                                          [java.nio.file.StandardCopyOption/COPY_ATTRIBUTES
+                                           java.nio.file.StandardCopyOption/REPLACE_EXISTING]))))
             prev (atom nil)
             record! (fn [record-fn event-key event]
                       (let [env (append-event! handle @prev record-fn event-key event)]
@@ -183,6 +293,16 @@
                                 :task/evaluator evaluator-id}
                          (some? argv) (assoc :agent/argv argv))
             _ (record! ledger/record-task :task-event task-event)
+            ;; 1a. Amendment A1-S5: a task-carried publication
+            ;; authorization is recorded through
+            ;; ledger/record-governance at admission (strict
+            ;; validation; malformed authorization is :invalid,
+            ;; exit 4). Once admitted it is ledger-native: the PR
+            ;; step reads the recorded event, not the raw task
+            ;; field.
+            pub-auth-envelope (when-some [auth (:task/publication-authorized task)]
+                                (record! ledger/record-governance
+                                         :governance-event auth))
             ;; 1b. Self-modifying tasks must run under the pinned
             ;; previous evaluator release (R11); the candidate's own
             ;; code is never the authority for its own acceptance.
@@ -342,12 +462,12 @@
                  :supervisor/report {:task/id (:task/id task)
                                      :task/status :blocked
                                      :task/blocker (:patch/reason patch-verdict)}})
-              ;; 6. Post-action verification
-              (let [verify-res (execute/verify-patch
-                                 patch-verdict task
-                                 {:verification/recipe (:task/pinned-recipe task)
-                                  :verification/exit 0
-                                  :verification/output "synthetic verification ok"})]
+              ;; 6. Post-action verification (A1-S5): the pinned
+              ;; recipe runs for real via the runner adapter; the
+              ;; named outcome decides the verdict.
+              (let [verify-res (verify-pinned-recipe
+                                 task patch-verdict (str wt-dir)
+                                 recipe-timeout-seconds)]
                 (if (not= :verified (:patch/verdict verify-res))
                   (do
                     (record! ledger/record-task :task-event
@@ -371,13 +491,18 @@
                              {:event/kind :task/completed
                               :task/id (:task/id task)
                               :task/evaluator evaluator-id})
-                    ;; 8. PR publication: only with a recorded
+                    ;; 8. PR publication (A1-S5): only with a
+                    ;; ledger-recorded
                     ;; `:governance/publication-authorized` event;
-                    ;; without it the patch stays local. There is no
-                    ;; merge code path anywhere.
-                    (let [pub-event (:task/publication-authorized task)
+                    ;; without it the patch stays local. The 3-arity
+                    ;; binds a digest-carrying authorization to the
+                    ;; admitted patch digest. There is no merge code
+                    ;; path anywhere.
+                    (let [pub-event (:governance/event
+                                     (:payload pub-auth-envelope))
                           published (when (pr/publication-authorized?
-                                           pub-event (:task/id task))
+                                           pub-event (:task/id task)
+                                           (:patch/digest patch-verdict))
                                       (pr/create-pr {:pr/kind :fake
                                                      :pr/task-id (:task/id task)
                                                      :pr/patch-digest (:patch/digest patch-verdict)}))]
@@ -432,7 +557,8 @@
                      :adapter-kind (keyword adapter)
                      :fake-script (:task/fake-script task)
                      :argv (:agent/argv inputs)
-                     :agent-timeout-ms (:task/agent-timeout-ms inputs)}))
+                     :agent-timeout-ms (:task/agent-timeout-ms inputs)
+                     :recipe-timeout-seconds (:task/recipe-timeout-seconds inputs)}))
         (catch clojure.lang.ExceptionInfo e
           {:supervisor/exit (if (= :invalid (:axiom/error (ex-data e))) 4 5)
            :supervisor/report {:error (or (:axiom/error (ex-data e)) :operational)

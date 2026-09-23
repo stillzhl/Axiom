@@ -16,7 +16,7 @@
   {:task/id "synth-task-docs-1"
    :task/class :task-class/standard
    :task/capabilities {:capability/write-file #{"docs/"}}
-   :task/pinned-recipe ["./scripts/check"]
+   :task/pinned-recipe ["/bin/true"]
    :task/scope {:scope/path-prefixes #{"docs/"}}
    :task/base-files {"docs/guide.md" "guide"}
    :task/fake-script
@@ -86,6 +86,7 @@
                       :task/publication-authorized
                       {:event/kind :governance/publication-authorized
                        :task/id "synth-task-docs-1"
+                       :governance/authorizer "synth-authorizer-1"
                        :governance/policy-id "synth-policy-1"})
           {:keys [supervisor/exit supervisor/report]} (supervisor/run-task {:task/definition (pr-str task)
                                            :task/adapter "fake"})]
@@ -166,7 +167,7 @@
    :task/class :task-class/standard
    :task/capabilities {:capability/write-file #{"note.txt"}}
    :task/scope {:scope/path-prefixes #{"note.txt"}}
-   :task/pinned-recipe ["./scripts/check"]
+   :task/pinned-recipe ["/bin/true"]
    :task/base-files {"note.txt" "base-content"}
    :task/agent-timeout-ms 10000
    :agent/argv argv})
@@ -264,7 +265,7 @@
                 :task/class :task-class/standard
                 :task/capabilities {:capability/write-file #{"added.txt"}}
                 :task/scope {:scope/path-prefixes #{"added.txt"}}
-                :task/pinned-recipe ["./scripts/check"]
+                :task/pinned-recipe ["/bin/true"]
                 :task/seed-dir (str seed)
                 :task/fake-script
                 [{:fake/kind :proposal
@@ -280,3 +281,80 @@
       (is (= 0 exit))
       (is (= :completed (:task/status report))
           "the seeded file is in the diff base; the patch covers only the worker's added.txt"))))
+
+;; ----------------------------------------------------------------
+;; Amendment A1 S5: ledger-backed publication authorization and
+;; real recipe execution with named outcomes.
+
+(deftest run-task-rejects-malformed-publication-authorization
+  (testing "a task-carried publication authorization without an authorizer is :invalid (exit 4)"
+    (let [task (assoc (docs-task)
+                      :task/id "synth-task-pub-1"
+                      :task/publication-authorized
+                      {:event/kind :governance/publication-authorized
+                       :task/id "synth-task-pub-1"
+                       :governance/policy-id "synth-policy-1"})
+          {:keys [supervisor/exit supervisor/report]}
+          (supervisor/run-task {:task/definition (pr-str task)
+                                :task/adapter "fake"})]
+      (is (= 4 exit))
+      (is (= :invalid (:error report))))))
+
+(defn- recipe-task [id recipe & {:keys [recipe-timeout]}]
+  (cond-> (assoc (docs-task)
+                 :task/id id
+                 :task/pinned-recipe recipe)
+    recipe-timeout (assoc :task/recipe-timeout-seconds recipe-timeout)))
+
+(deftest run-task-verification-failed-on-nonzero-recipe-exit
+  (testing "a pinned recipe that exits nonzero blocks with :verification-failed"
+    (let [{:keys [supervisor/exit supervisor/report]}
+          (supervisor/run-task
+           {:task/definition (pr-str (recipe-task "synth-task-verify-1" ["/bin/false"]))
+            :task/adapter "fake"})]
+      (is (= 0 exit) "the run is valid; the task is blocked")
+      (is (= :blocked (:task/status report)))
+      (is (= :verification-failed (:task/blocker report))))))
+
+(deftest run-task-verification-timed-out
+  (testing "a pinned recipe that exceeds its timeout blocks with :verification-timed-out"
+    (let [{:keys [supervisor/exit supervisor/report]}
+          (supervisor/run-task
+           {:task/definition (pr-str (recipe-task "synth-task-verify-2"
+                                                 ["/bin/sleep" "10"]
+                                                 :recipe-timeout 1))
+            :task/adapter "fake"})]
+      (is (= 0 exit) "the run is valid; the task is blocked")
+      (is (= :blocked (:task/status report)))
+      (is (= :verification-timed-out (:task/blocker report))))))
+
+(deftest run-task-verification-output-capped
+  (testing "a pinned recipe that exceeds its output cap blocks with :verification-output-capped"
+    (let [{:keys [supervisor/exit supervisor/report]}
+          (supervisor/run-task
+           {:task/definition (pr-str (recipe-task "synth-task-verify-3"
+                                                 ["/bin/sh" "-c" "head -c 20000000 /dev/zero"]))
+            :task/adapter "fake"})]
+      (is (= 0 exit) "the run is valid; the task is blocked")
+      (is (= :blocked (:task/status report)))
+      (is (= :verification-output-capped (:task/blocker report))))))
+
+(deftest run-task-verification-spawn-failed
+  (testing "a pinned recipe that cannot be spawned blocks with :verification-spawn-failed"
+    (let [{:keys [supervisor/exit supervisor/report]}
+          (supervisor/run-task
+           {:task/definition (pr-str (recipe-task "synth-task-verify-4"
+                                                 ["/nonexistent/command"]))
+            :task/adapter "fake"})]
+      (is (= 0 exit) "the run is valid; the task is blocked")
+      (is (= :blocked (:task/status report)))
+      (is (= :verification-spawn-failed (:task/blocker report))))))
+
+(deftest run-task-rejects-malformed-pinned-recipe
+  (testing "a task with a malformed pinned recipe is :invalid (exit 4)"
+    (let [{:keys [supervisor/exit supervisor/report]}
+          (supervisor/run-task
+           {:task/definition (pr-str (recipe-task "synth-task-verify-5" []))
+            :task/adapter "fake"})]
+      (is (= 4 exit))
+      (is (= :invalid (:error report))))))
