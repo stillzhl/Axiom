@@ -32,8 +32,19 @@
 
 (defn publication-authorized?
   "Pure predicate: true when the governance event authorizes
-   publication of the given task's patch."
-  [governance-event task-id]
-  (and (= :governance/publication-authorized (:event/kind governance-event))
-       (= task-id (:task/id governance-event))
-       (string? (:governance/policy-id governance-event))))
+   publication of the given task's patch. Amendment A1: the
+   3-arity optionally binds to the admitted patch digest — an
+   event carrying `:patch/digest` authorizes only that exact
+   patch; an event without one authorizes any patch from the
+   task. The 2-arity delegates to the 3-arity with no digest, so
+   a digest-bound event is never authorized without the binding
+   (no bypass); it returns false rather than throwing on
+   malformed events."
+  ([governance-event task-id]
+   (publication-authorized? governance-event task-id nil))
+  ([governance-event task-id patch-digest]
+   (and (= :governance/publication-authorized (:event/kind governance-event))
+        (= task-id (:task/id governance-event))
+        (string? (:governance/policy-id governance-event))
+        (or (nil? (:patch/digest governance-event))
+            (= patch-digest (:patch/digest governance-event))))))
