@@ -104,7 +104,12 @@
     (if (and (map? worktree) (non-blank-string? (:worktree/path worktree))
              (integer? timeout-ms) (pos? timeout-ms))
       {:agent/kind :process :agent/id id :agent/ok true
-       :agent/worktree worktree :agent/timeout-ms timeout-ms}
+       :agent/worktree worktree :agent/timeout-ms timeout-ms
+       ;; A process worker is one-shot: it runs once, writes its
+       ;; files, and emits its proposal. A second run-agent call
+       ;; reports :script-exhausted so the supervisor loop ends
+       ;; instead of re-spawning the worker forever.
+       :process/ran (atom false)}
       {:agent/ok false :agent/reason :malformed})
 
     :else
@@ -144,18 +149,28 @@
       (and (map? env)
            (every? (fn [[k v]] (and (string? k) (string? v))) env))))
 
-(defn- start-process
-  [agent {:agent/keys [argv env] :as _request}]
-  (cond
-    (not (and (sequential? argv) (seq argv) (every? non-blank-string? argv)))
-    {:agent/ok false :agent/reason :malformed :agent/id (:agent/id agent)}
+(defn- valid-process-request?
+  "Request validation for a :process run (spec 0006 amendment A1,
+   AR8): `:agent/argv` must be a non-empty sequence of non-blank
+   strings, and `:agent/env`, when present, a map of strings to
+   strings. `run-agent` checks this before the one-shot guard so a
+   malformed request always yields `:malformed`, even on an agent
+   that has already run."
+  [{:agent/keys [argv env]}]
+  (and (sequential? argv) (seq argv) (every? non-blank-string? argv)
+       (valid-env? env)))
 
-    (not (valid-env? env))
+(defn- start-process
+  [agent request]
+  (cond
+    (not (valid-process-request? request))
     {:agent/ok false :agent/reason :malformed :agent/id (:agent/id agent)}
 
     :else
     (let [workdir (:worktree/path (:agent/worktree agent))
-          resolved (worktree/resolve-path (:agent/worktree agent) ".")]
+          resolved (worktree/resolve-path (:agent/worktree agent) ".")
+          argv (:agent/argv request)
+          env (:agent/env request)]
       (if (not (:worktree/ok resolved))
         {:agent/ok false :agent/reason :workdir-escape :agent/id (:agent/id agent)}
         (let [pb (ProcessBuilder. ^java.util.List argv)]
@@ -238,10 +253,22 @@
    completion. Returns `{:agent/ok true, :agent/proposal
    <proposal>}` for the fake agent (adversarial steps
    additionally carry `:agent/adversarial`), or the process
-   result. Malformed agents yield `{:agent/ok false,
-   :agent/reason :malformed}`."
+   result. Request validation runs on every call: a malformed
+   request yields `{:agent/ok false, :agent/reason :malformed}`
+   even after the agent has run. A `:process` agent is one-shot:
+   after its first execution a further *valid* call returns
+   `{:agent/ok false, :agent/reason :script-exhausted}` so the
+   supervisor loop ends instead of re-spawning the worker.
+   Malformed agents yield `{:agent/ok false, :agent/reason
+   :malformed}`."
   [agent request]
-  (let [started (start-agent agent request)]
-    (if (and (:agent/ok started) (:agent/wait! started))
-      ((:agent/wait! started))
-      started)))
+  (if (and (= :process (:agent/kind agent))
+           (valid-process-request? request)
+           @(:process/ran agent))
+    {:agent/ok false :agent/reason :script-exhausted :agent/id (:agent/id agent)}
+    (let [started (start-agent agent request)]
+      (when (and (= :process (:agent/kind agent)) (:agent/ok started))
+        (reset! (:process/ran agent) true))
+      (if (and (:agent/ok started) (:agent/wait! started))
+        ((:agent/wait! started))
+        started))))

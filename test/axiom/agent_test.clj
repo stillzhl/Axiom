@@ -157,11 +157,15 @@
               good-argv ["echo" "{:proposal/actions []}"]]
           ;; absent env is fine
           (is (true? (:agent/ok (agent/run-agent a {:agent/argv good-argv}))))
-          ;; string->string env is fine
-          (is (true? (:agent/ok (agent/run-agent
+          ;; the process agent is one-shot (amendment A1 AR10): a
+          ;; second valid call ends the loop instead of re-spawning
+          (is (= :script-exhausted
+                 (:agent/reason (agent/run-agent
                                  a {:agent/argv good-argv
                                     :agent/env {"SYNTH_VAR" "synth-value"}}))))
-          ;; non-string keys/values and non-maps are :malformed
+          ;; non-string keys/values and non-maps are :malformed;
+          ;; validation runs before the one-shot guard, so these are
+          ;; :malformed even though the agent has already run
           (doseq [env [{"SYNTH_VAR" 7}
                        {7 "synth-value"}
                        {"SYNTH_VAR" nil}
