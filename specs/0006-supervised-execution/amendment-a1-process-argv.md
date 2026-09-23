@@ -149,6 +149,25 @@ it.
   0001–0005 decision bytes, exit contracts, and ledger
   schema semantics are unchanged beyond the additive
   fields/kinds above.
+- AR10: Process adapter one-shot semantics. A `:process`
+  agent instance is one-shot: after its first execution, a
+  further call carrying a *valid* request returns
+  `{:agent/ok false, :agent/reason :script-exhausted}` so
+  the supervisor loop ends instead of re-spawning the
+  worker (an unbounded process task would otherwise
+  re-run the worker forever; the fake adapter terminates
+  the loop the same way when its script runs out, and
+  the supervisor already treats `:script-exhausted` as
+  loop `:done`). Request validation runs on every call
+  and takes precedence over the one-shot guard: a
+  malformed request always yields `:malformed`, even on
+  an agent that has already run — the fail-closed
+  contract is unchanged. This supersedes the multi-run
+  process behavior pinned by the S3 test; the test is
+  updated in the S4 slice to pin the one-shot contract.
+  Testable: first valid call `:ok true`; second valid
+  call `:script-exhausted`; malformed calls `:malformed`
+  before and after the first run.
 
 ## Explicit boundaries
 
